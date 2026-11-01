@@ -50,6 +50,8 @@ STOPWORDS = {
     "their", "then", "there", "these", "they", "this", "those", "to", "us", "was",
     "we", "what", "when", "where", "which", "who", "why", "will", "with", "would",
     "you", "your",
+    # request verbs that start questions but say nothing about the topic
+    "describe", "explain", "please", "show", "tell",
 }
 BM25_K1 = 1.2
 BM25_B = 0.75
@@ -105,8 +107,9 @@ def build_index(docs):
 
 def query_stems(query):
     raw = re.findall(r"[a-z0-9]+", query.lower())
-    kept = [t for t in raw if t not in STOPWORDS and len(t) > 1]
-    chosen = kept or [t for t in raw if len(t) > 1]
+    # Keep single digits: "week 1" and "week 4" are different questions.
+    kept = [t for t in raw if t not in STOPWORDS and (len(t) > 1 or t.isdigit())]
+    chosen = kept or [t for t in raw if len(t) > 1 or t.isdigit()]
     return list(dict.fromkeys(stem(t) for t in chosen))
 
 
