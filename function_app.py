@@ -8,7 +8,7 @@ import tempfile
 import time
 from collections import Counter
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import azure.functions as func
 from dulwich import porcelain
@@ -430,6 +430,62 @@ def search(req: func.HttpRequest):
             {"error": "Unexpected server error"},
             500,
         )
+
+
+@app.route(route="document", methods=["GET", "POST"])
+def document(req: func.HttpRequest):
+    """Return one wiki page as plain text, found by url, path, or title."""
+    try:
+        try:
+            data = req.get_json() if req.method == "POST" else dict(req.params)
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        wanted_url = unquote(str(data.get("url") or "")).strip().rstrip("/").lower()
+        wanted_path = str(data.get("path") or "").strip().lower()
+        wanted_title = str(data.get("title") or "").strip().lower()
+        if not (wanted_url or wanted_path or wanted_title):
+            return respond({"error": "Provide url, path, or title"}, 400)
+        max_chars = max(500, min(int(data.get("max_chars", 8000)), 30000))
+
+        documents()  # load or refresh the wiki and its index
+        match = None
+        # Excluded pages are not in the index, so they can never be returned here.
+        for entry in cache["index"]["entries"]:
+            doc = entry["doc"]
+            if (
+                (wanted_url and unquote(doc["url"]).rstrip("/").lower() == wanted_url)
+                or (wanted_path and doc["path"].lower() == wanted_path)
+                or (wanted_title and doc["title"].lower() == wanted_title)
+            ):
+                match = entry
+                break
+        if not match:
+            return respond({"error": "Wiki page not found"}, 404)
+
+        text = match["body"]
+        doc = match["doc"]
+        return respond({
+            "status": "ok",
+            "title": doc["title"],
+            "url": doc["url"],
+            "source": "wiki",
+            "chunk_id": doc["path"],
+            "total_chars": len(text),
+            "truncated": len(text) > max_chars,
+            "text": text[:max_chars],
+        })
+
+    except ValueError:
+        return respond({"error": "max_chars must be a number"}, 400)
+    except requests.RequestException:
+        logging.exception("GitHub request failed")
+        return respond({"error": "Could not load content from GitHub"}, 502)
+    except Exception:
+        logging.exception("Document lookup failed")
+        return respond({"error": "Unexpected server error"}, 500)
 
 
 @app.route(route="refresh", methods=["POST"])
