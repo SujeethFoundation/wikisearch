@@ -384,6 +384,35 @@ def health(req: func.HttpRequest):
     )
 
 
+def parse_flag(value, default):
+    """Read a true/false setting from a query string or JSON body."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def attach_full_text(results, max_chars):
+    """Add each result's whole page as text, cut at max_chars.
+
+    Only the results being returned are looked up. Excluded pages are not in the index,
+    so their text can never be returned here.
+    """
+    entries = {
+        entry["doc"]["path"]: entry
+        for entry in (cache.get("index") or {}).get("entries", [])
+    }
+    for item in results:
+        entry = entries.get(item.get("path"))
+        if not entry:
+            continue
+        body = entry["body"]
+        item["text"] = body[:max_chars]
+        item["total_chars"] = len(body)
+        item["truncated"] = len(body) > max_chars
+
+
 @app.route(route="search", methods=["GET", "POST"])
 def search(req: func.HttpRequest):
     try:
@@ -391,6 +420,8 @@ def search(req: func.HttpRequest):
             body = req.get_json()
             query = str(body.get("query", "")).strip()
             limit = int(body.get("limit", 8))
+            full_text = parse_flag(body.get("full_text"), True)
+            max_chars = int(body.get("max_chars", 8000))
         else:
             query = (
                 req.params.get("q")
@@ -398,6 +429,8 @@ def search(req: func.HttpRequest):
                 or ""
             ).strip()
             limit = int(req.params.get("limit", 8))
+            full_text = parse_flag(req.params.get("full_text"), True)
+            max_chars = int(req.params.get("max_chars", 8000))
 
         if not query:
             return respond(
@@ -410,13 +443,17 @@ def search(req: func.HttpRequest):
 
         documents()  # load or refresh the wiki and its ranking index
         results = rank(query)
+        shown = results[: max(1, min(limit, 20))]
+        if full_text:
+            attach_full_text(shown, max(500, min(max_chars, 30000)))
 
         return respond(
             {
                 "query": query,
                 "search_mode": "keyword_bm25",
+                "full_text": full_text,
                 "count": len(results),
-                "results": results[: max(1, min(limit, 20))],
+                "results": shown,
             }
         )
 
