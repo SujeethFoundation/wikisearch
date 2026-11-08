@@ -5,6 +5,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -330,15 +331,12 @@ def read_wiki():
     return docs
 
 
-def documents(force=False):
-    """Return cached wiki documents, refreshing when necessary."""
-    if (
-        cache["docs"]
-        and not force
-        and time.time() - cache["time"] < CACHE_SECONDS
-    ):
-        return cache["docs"]
+_refresh_lock = threading.Lock()
+_last_failure = {"time": 0.0, "error": None}
 
+
+def _rebuild():
+    """Read the wiki and replace the cached copy. Callers hold _refresh_lock."""
     docs = read_wiki()
 
     if not docs:
@@ -349,6 +347,52 @@ def documents(force=False):
 
     cache.update({"time": time.time(), "docs": docs, "index": build_index(docs)})
     return docs
+
+
+def _refresh_in_background():
+    """Start one background refresh if none is running. Never blocks."""
+    if not _refresh_lock.acquire(blocking=False):
+        return  # another request already started one
+
+    def work():
+        try:
+            _rebuild()
+        except Exception:
+            logging.exception("Background wiki refresh failed; the older copy stays in use")
+        finally:
+            _refresh_lock.release()
+
+    threading.Thread(target=work, name="wiki-refresh", daemon=True).start()
+
+
+def documents(force=False):
+    """Return cached wiki documents, refreshing when necessary.
+
+    Reading the wiki takes about 20 seconds, so it is done once at a time. With a copy in
+    memory, a request is never held up by a refresh: a stale copy is served while one
+    background refresh runs. Only a request that finds nothing in memory waits (and only for
+    one read, which every waiting request shares), and so does a forced refresh.
+    """
+    fresh = bool(cache["docs"]) and time.time() - cache["time"] < CACHE_SECONDS
+    if fresh and not force:
+        return cache["docs"]
+
+    if cache["docs"] and not force:
+        _refresh_in_background()
+        return cache["docs"]
+
+    with _refresh_lock:
+        # Another request may have finished a read while this one waited for the lock.
+        if not force and cache["docs"] and time.time() - cache["time"] < CACHE_SECONDS:
+            return cache["docs"]
+        # If that read just failed, say so now instead of making every waiting request repeat it.
+        if not force and _last_failure["error"] and time.time() - _last_failure["time"] < 15:
+            raise _last_failure["error"]
+        try:
+            return _rebuild()
+        except Exception as exc:
+            _last_failure.update(time=time.time(), error=exc)
+            raise
 
 
 def plain(text):
