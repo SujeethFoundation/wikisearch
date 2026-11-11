@@ -6,7 +6,7 @@ It works independently of the Azure AI Search index, so wiki answers stay availa
 
 ## How it works
 
-- On first use and every `CACHE_SECONDS` (default 900), it clones the public wiki repository (`<repo>.wiki.git`) with Dulwich, without calling system Git, and reads the Markdown files from the latest commit. The first request after a cold start pays for the clone.
+- On first use and every `CACHE_SECONDS` (default 900), it clones the public wiki repository (`<repo>.wiki.git`) with Dulwich, without calling system Git, and reads the Markdown files from the latest commit. The first request after a cold start pays for the clone unless the worker has already finished the preload or a shared snapshot is configured (see Settings). Searches always wait for wiki results; the snapshot only shortens that wait. The `/health` route reports `loaded_from` (`github` or `snapshot`).
 - Pages are indexed in memory per instance. Pages whose title or path matches the exclusion pattern are left out of the index completely (see below).
 - Ranking is BM25-style keyword scoring:
   - common words ("how", "can", "the", "to") are ignored;
@@ -51,6 +51,10 @@ It is checked against the page title and file path. Change it with `WIKI_EXCLUDE
 | `GITHUB_TOKEN` | none | Optional token (only needed for rate limits or a private wiki) |
 | `CACHE_SECONDS` | `900` | How long the loaded wiki is reused |
 | `MAX_FILES` | `250` | Maximum pages loaded |
+| `PRELOAD_ON_START` | `true` | Start reading the wiki when the worker starts, not at the first request |
+| `WIKI_SNAPSHOT_CONNECTION_STRING` | none (off) | Storage connection string for a shared snapshot of the pages. When set, every read from GitHub is also saved there, and a new instance loads the snapshot first (under a second) and then refreshes from GitHub in the background |
+| `WIKI_SNAPSHOT_CONTAINER` | `wiki-cache` | Container for the snapshot, created if it does not exist |
+| `WIKI_SNAPSHOT_BLOB` | `wiki-snapshot.json` | Blob name of the snapshot |
 | `WIKI_EXCLUDE_TITLE_PATTERN` | see above | Pages never returned |
 
 ## Examples

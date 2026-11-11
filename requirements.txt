@@ -1,3 +1,4 @@
 azure-functions
 requests
 dulwich
+azure-storage-blob

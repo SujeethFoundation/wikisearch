@@ -31,7 +31,7 @@ session.headers["User-Agent"] = "SujeethFoundation-ContentSearch/0.1"
 if TOKEN:
     session.headers["Authorization"] = f"Bearer {TOKEN}"
 
-cache = {"time": 0, "docs": [], "index": None}
+cache = {"time": 0, "docs": [], "index": None, "source": None}
 
 # ---------------------------------------------------------------------------
 # Ranking: BM25-style keyword scoring.
@@ -334,6 +334,78 @@ def read_wiki():
 _refresh_lock = threading.Lock()
 _last_failure = {"time": 0.0, "error": None}
 
+# ---------------------------------------------------------------------------
+# Cold starts. Reading the wiki from GitHub takes about 20 seconds, and a new instance starts with
+# nothing in memory, so without help the first request on it (and every request that arrives while it
+# waits) pays for the whole read. Two things reduce that. Neither makes the wiki optional: a search
+# still waits for wiki results, it just waits much less.
+#
+# PRELOAD_ON_START (default true): start reading as soon as the worker starts, not at the first request.
+#
+# A shared snapshot (optional, off unless WIKI_SNAPSHOT_CONNECTION_STRING is set): after every
+# successful read from GitHub the pages are saved to one blob. A new instance loads that blob in a
+# fraction of a second, and the usual background refresh brings it up to date from GitHub afterwards.
+# If the snapshot is missing, unreadable or invalid the instance reads GitHub as before.
+# ---------------------------------------------------------------------------
+PRELOAD_ON_START = os.getenv("PRELOAD_ON_START", "true").strip().lower() in ("1", "true", "yes", "on")
+SNAPSHOT_CONNECTION = os.getenv("WIKI_SNAPSHOT_CONNECTION_STRING", "")
+SNAPSHOT_CONTAINER = os.getenv("WIKI_SNAPSHOT_CONTAINER", "wiki-cache")
+SNAPSHOT_BLOB = os.getenv("WIKI_SNAPSHOT_BLOB", "wiki-snapshot.json")
+SNAPSHOT_TIMEOUT_SECONDS = 15
+_DOC_FIELDS = ("title", "url", "source", "path", "text")
+
+
+def _snapshot_enabled():
+    return bool(SNAPSHOT_CONNECTION)
+
+
+def _valid_docs(docs):
+    return (
+        isinstance(docs, list)
+        and len(docs) > 0
+        and all(isinstance(d, dict) and all(isinstance(d.get(f), str) for f in _DOC_FIELDS) for d in docs)
+    )
+
+
+def _snapshot_load():
+    """(docs, saved_at) from the shared snapshot, or None. Never raises."""
+    if not _snapshot_enabled():
+        return None
+    try:
+        from azure.storage.blob import BlobClient  # imported here so the app runs without the package when unused
+
+        client = BlobClient.from_connection_string(SNAPSHOT_CONNECTION, SNAPSHOT_CONTAINER, SNAPSHOT_BLOB)
+        data = json.loads(client.download_blob(timeout=SNAPSHOT_TIMEOUT_SECONDS).readall())
+        docs, saved_at = data.get("docs"), float(data.get("saved_at"))
+        if not _valid_docs(docs):
+            logging.warning("Wiki snapshot is not valid; reading GitHub instead")
+            return None
+        return docs, saved_at
+    except Exception as exc:
+        logging.warning("Wiki snapshot could not be read (%s); reading GitHub instead", type(exc).__name__)
+        return None
+
+
+def _snapshot_save(docs, saved_at):
+    """Write the pages to the shared snapshot. Never raises."""
+    if not _snapshot_enabled():
+        return
+    try:
+        from azure.core.exceptions import ResourceExistsError
+        from azure.storage.blob import ContainerClient
+
+        container = ContainerClient.from_connection_string(SNAPSHOT_CONNECTION, SNAPSHOT_CONTAINER)
+        try:
+            container.create_container()
+        except ResourceExistsError:
+            pass
+        payload = json.dumps({"saved_at": saved_at, "docs": docs}, ensure_ascii=False)
+        container.upload_blob(SNAPSHOT_BLOB, payload.encode("utf-8"), overwrite=True,
+                              timeout=SNAPSHOT_TIMEOUT_SECONDS)
+        logging.info("Saved %d wiki pages to the shared snapshot", len(docs))
+    except Exception as exc:
+        logging.warning("Wiki snapshot could not be saved (%s)", type(exc).__name__)
+
 
 def _rebuild():
     """Read the wiki and replace the cached copy. Callers hold _refresh_lock."""
@@ -345,7 +417,10 @@ def _rebuild():
             "and is accessible."
         )
 
-    cache.update({"time": time.time(), "docs": docs, "index": build_index(docs)})
+    saved_at = time.time()
+    cache.update({"time": saved_at, "docs": docs, "index": build_index(docs), "source": "github"})
+    if _snapshot_enabled():
+        threading.Thread(target=_snapshot_save, args=(docs, saved_at), name="wiki-snapshot", daemon=True).start()
     return docs
 
 
@@ -386,6 +461,15 @@ def documents(force=False):
         if not force and cache["docs"] and time.time() - cache["time"] < CACHE_SECONDS:
             return cache["docs"]
         # If that read just failed, say so now instead of making every waiting request repeat it.
+        if not force and not cache["docs"]:
+            loaded = _snapshot_load()
+            if loaded:
+                docs, saved_at = loaded
+                cache.update({"time": saved_at, "docs": docs, "index": build_index(docs), "source": "snapshot"})
+                logging.info("Loaded %d wiki pages from the shared snapshot (%d seconds old)",
+                             len(docs), time.time() - saved_at)
+                # If the snapshot is older than CACHE_SECONDS, the next request starts the usual background refresh.
+                return docs
         if not force and _last_failure["error"] and time.time() - _last_failure["time"] < 15:
             raise _last_failure["error"]
         try:
@@ -424,6 +508,8 @@ def health(req: func.HttpRequest):
             "repository": f"{OWNER}/{REPO}",
             "cache_loaded": bool(cache["docs"]),
             "document_count": len(cache["docs"]),
+            "loaded_from": cache.get("source"),
+            "snapshot_enabled": _snapshot_enabled(),
         }
     )
 
@@ -591,3 +677,15 @@ def refresh(req: func.HttpRequest):
             {"error": "Could not refresh content"},
             502,
         )
+
+
+def _preload():
+    """Read the wiki now, in the background, so a new instance does not wait for its first request to start."""
+    try:
+        documents()
+    except Exception:
+        logging.warning("Wiki preload failed; the first request will try again", exc_info=True)
+
+
+if PRELOAD_ON_START:
+    threading.Thread(target=_preload, name="wiki-preload", daemon=True).start()
