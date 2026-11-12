@@ -58,6 +58,34 @@ BM25_K1 = 1.2
 BM25_B = 0.75
 TITLE_BOOST = 3.0
 
+# Words that belong together match each other ("job" and "jobs", "donate", "donation" and "donating"), and words that only
+# look alike do not ("interview", "interest" and "internship"; "program" and "progress"). WIKI_STEMMER=prefix goes back to
+# comparing the first five letters, which merged those and kept "job" and "jobs" apart.
+STEMMER = os.getenv("WIKI_STEMMER", "english").strip().lower()
+# Keyword scoring ignores word order. A page that has the question's words together, in order and at most a few words apart
+# ("tailor my resume", "reach out to a professional"), scores up to 1 + WIKI_PHRASE_BOOST times as much. Only the words that
+# say what the question is about are paired (not "how do" or "do I"), and a pair weighs what its commoner word weighs.
+# 0 turns it off.
+PHRASE_BOOST = float(os.getenv("WIKI_PHRASE_BOOST", "0.5"))
+# The excerpt shown for a page is the stretch of it that holds the most of the question (true), or the stretch starting at the
+# rarest matched word (false, the old behaviour).
+BEST_PASSAGE = os.getenv("WIKI_BEST_PASSAGE", "true").strip().lower() in ("1", "true", "yes", "on")
+SNIPPET_CHARS = 1500
+SNIPPET_LEAD = 200
+PAIR_WINDOW = 4  # two of the question's words count as together when at most this many words apart, in order
+
+try:
+    import snowballstemmer
+    _english = snowballstemmer.stemmer("english")
+except Exception:  # the package is missing: search still works, with the old rule
+    _english = None
+    logging.warning("snowballstemmer is not installed; comparing words by their first five letters")
+_stem_memo = {}
+
+
+def stemmer_in_use():
+    return "english" if STEMMER != "prefix" and _english is not None else "prefix"
+
 # Pages about recorded circle sessions are never returned. Override the pattern with
 # WIKI_EXCLUDE_TITLE_PATTERN in the app settings.
 WIKI_EXCLUDE = re.compile(
@@ -70,16 +98,36 @@ WIKI_EXCLUDE = re.compile(
 
 
 def stem(token):
-    return token[:5] if len(token) >= 6 else token
+    if stemmer_in_use() == "prefix":
+        return token[:5] if len(token) >= 6 else token
+    found = _stem_memo.get(token)
+    if found is None:
+        found = token if token.isdigit() else _english.stemWord(token)
+        if len(_stem_memo) < 200000:
+            _stem_memo[token] = found
+    return found
 
 
 def stems(text):
     return [stem(t) for t in re.findall(r"[a-z0-9]+", str(text).lower())]
 
 
+def stem_positions(lowered):
+    """[(where the word starts, its stem), ...] for a lower-case text."""
+    return [(m.start(), stem(m.group())) for m in re.finditer(r"[a-z0-9]+", lowered)]
+
+
 def is_excluded(doc):
     label = f"{doc['title']} {doc['path']}".replace("-", " ").replace("%3A", " ")
     return bool(WIKI_EXCLUDE.search(label))
+
+
+def _places(stem_list):
+    """{stem: [its places in the page, in order]}"""
+    where = {}
+    for i, s in enumerate(stem_list):
+        where.setdefault(s, []).append(i)
+    return where
 
 
 def build_index(docs):
@@ -89,7 +137,8 @@ def build_index(docs):
         if is_excluded(doc):
             continue
         body = plain(doc["text"])
-        body_stems = stems(body)
+        positions = stem_positions(body.lower())
+        body_stems = [s for _, s in positions]
         body_tf = Counter(body_stems)
         title_tf = Counter(stems(doc["title"] + " " + doc["path"].rsplit(".", 1)[0]))
         for term in set(body_tf) | set(title_tf):
@@ -100,22 +149,107 @@ def build_index(docs):
             "body_lower": body.lower(),
             "body_tf": body_tf,
             "title_tf": title_tf,
+            "positions": positions,
+            "where": _places(body_stems),
             "length": max(1, len(body_stems)),
         })
     average = sum(e["length"] for e in entries) / len(entries) if entries else 1.0
     return {"entries": entries, "df": df, "average_length": average}
 
 
+def query_words(query):
+    """The question's words in lower case, in order."""
+    return re.findall(r"[a-z0-9]+", str(query).lower())
+
+
 def query_stems(query):
-    raw = re.findall(r"[a-z0-9]+", query.lower())
+    raw = query_words(query)
     # Keep single digits: "week 1" and "week 4" are different questions.
     kept = [t for t in raw if t not in STOPWORDS and (len(t) > 1 or t.isdigit())]
     chosen = kept or [t for t in raw if len(t) > 1 or t.isdigit()]
     return list(dict.fromkeys(stem(t) for t in chosen))
 
 
-def rank(query):
-    """Return every matching page, best first."""
+def content_words(query):
+    """The question's words that say what it is about, in order, as stems: no stop words, no single letters."""
+    return [stem(t) for t in query_words(query) if t not in STOPWORDS and (len(t) > 1 or t.isdigit())]
+
+
+def query_pairs(query, index):
+    """{(stem, next stem): weight} for each two words of the question that follow each other once the stop words are taken
+    out: "reach out to a professional" gives (reach, out) and (out, professional). A pair weighs what its commoner word
+    weighs. Pairs with a word no page has are left out: nothing can hold them."""
+    n = len(index["entries"])
+    df = index["df"]
+    idf = lambda t: math.log(1 + (n - df.get(t, 0) + 0.5) / (df.get(t, 0) + 0.5))
+    words = content_words(query)
+    pairs = {}
+    for a, b in zip(words, words[1:]):
+        if a != b and df.get(a) and df.get(b):
+            pairs[(a, b)] = min(idf(a), idf(b))
+    return pairs
+
+
+def pair_places(entry, pair):
+    """Where in the page (as places in entry["positions"]) the two words of a pair come in order, at most PAIR_WINDOW words
+    apart, so "tailor my resume" and "reach out to a professional" count."""
+    first, second = entry["where"].get(pair[0]), entry["where"].get(pair[1])
+    if not first or not second:
+        return []
+    found, j = [], 0
+    for i in first:
+        while j < len(second) and second[j] <= i:
+            j += 1
+        if j < len(second) and second[j] - i <= PAIR_WINDOW:
+            found.append(i)
+    return found
+
+
+def best_passage(entry, idf, pairs):
+    """(where the best excerpt starts, the share of the question's words it holds, by rarity).
+
+    The best excerpt is the SNIPPET_CHARS stretch, starting SNIPPET_LEAD before one of the question's words, that holds the
+    most of the question: each different word counts once, by rarity, and so does each pair of neighbouring words."""
+    total = sum(idf.values())
+    positions = entry["positions"]
+    marks = []  # (where, what, weight, counts as a word)
+    for s, weight in idf.items():
+        for i in entry["where"].get(s, ()):
+            marks.append((positions[i][0], s, weight, True))
+    for pair, weight in (pairs or {}).items():
+        for i in pair_places(entry, pair):
+            marks.append((positions[i][0], pair, weight, False))
+    if not marks or total <= 0:
+        return 0, 0.0
+    marks.sort(key=lambda m: m[0])
+    best = (-1.0, 0, 0.0)  # (score, start, word share)
+    counts, score, words, left, right = Counter(), 0.0, 0.0, 0, 0
+    for where, what, weight, is_word in marks:
+        if not is_word:
+            continue  # an excerpt starts just before one of the question's words
+        start = max(0, where - SNIPPET_LEAD)
+        stop = start + SNIPPET_CHARS
+        while right < len(marks) and marks[right][0] < stop:
+            _, k, w, word = marks[right]
+            if counts[k] == 0:
+                score += w
+                words += w if word else 0.0
+            counts[k] += 1
+            right += 1
+        while left < right and marks[left][0] < start:
+            _, k, w, word = marks[left]
+            counts[k] -= 1
+            if counts[k] == 0:
+                score -= w
+                words -= w if word else 0.0
+            left += 1
+        if score > best[0] + 1e-9:
+            best = (score, start, words / total)
+    return best[1], max(0.0, min(1.0, best[2]))
+
+
+def rank(query, debug=False):
+    """Return every matching page, best first. debug=True adds to each result how its score came about."""
     index = cache.get("index") or build_index(cache["docs"])
     terms = query_stems(query)
     if not terms or not index["entries"]:
@@ -125,6 +259,8 @@ def rank(query):
         t: math.log(1 + (n - index["df"].get(t, 0) + 0.5) / (index["df"].get(t, 0) + 0.5))
         for t in terms
     }
+    pairs = query_pairs(query, index) if PHRASE_BOOST > 0 or BEST_PASSAGE else {}
+    pair_total = sum(pairs.values())
     results = []
     for entry in index["entries"]:
         score, matched = 0.0, []
@@ -137,30 +273,59 @@ def rank(query):
             score += idf[t] * weighted * (BM25_K1 + 1) / (weighted + BM25_K1 * norm)
         if not matched:
             continue
+        keyword_score = score
         score *= 0.5 + 0.5 * (len(matched) / len(terms))
         # A page whose title or page name matches the query is probably the target page.
         title_hits = sum(1 for t in terms if entry["title_tf"].get(t))
         score *= 1 + 1.5 * (title_hits / len(terms))
+        # The question's neighbouring words found side by side.
+        together = [pair for pair in pairs if pair_places(entry, pair)]
+        phrase_share = (sum(pairs[pair] for pair in together) / pair_total) if pair_total > 0 else 0.0
+        if PHRASE_BOOST > 0:
+            score *= 1 + PHRASE_BOOST * phrase_share
+        # The stretch of the page that holds the most of the question: that is the excerpt shown.
+        passage_start, passage_share = best_passage(entry, idf, pairs)
 
-        # Start the snippet at the rarest matched term that appears in the text.
-        start = 0
-        for t in sorted(matched, key=lambda x: idf[x], reverse=True):
-            hit = re.search(r"\b" + re.escape(t), entry["body_lower"])
-            if hit:
-                start = max(0, hit.start() - 200)
-                break
+        if BEST_PASSAGE:
+            start = passage_start
+        else:
+            # Start the snippet at the rarest matched term that appears in the text.
+            start = 0
+            for t in sorted(matched, key=lambda x: idf[x], reverse=True):
+                where = next((p for p, s in entry["positions"] if s == t), None)
+                if where is not None:
+                    start = max(0, where - SNIPPET_LEAD)
+                    break
         doc = entry["doc"]
-        results.append({
+        result = {
             "title": doc["title"],
             "url": doc["url"],
             "source": doc["source"],
             "path": doc["path"],
             "chunk_id": doc["path"],
             "score": round(score, 3),
-            "snippet": entry["body"][start:start + 1500],
-        })
+            "snippet": entry["body"][start:start + SNIPPET_CHARS],
+        }
+        if debug:
+            result["why"] = {
+                "words": {t: {"rarity": round(idf[t], 2), "in_text": entry["body_tf"].get(t, 0), "in_title": entry["title_tf"].get(t, 0)}
+                          for t in terms},
+                "keyword_score": round(keyword_score, 3),
+                "words_matched": f"{len(matched)} of {len(terms)}",
+                "title_share": round(title_hits / len(terms), 2),
+                "pairs_together": [" ".join(pair) for pair in together],
+                "pairs_looked_for": [" ".join(pair) for pair in pairs],
+                "phrase_share": round(phrase_share, 2),
+                "passage_share": round(passage_share, 2),
+                "excerpt_starts_at": start,
+            }
+        results.append(result)
     results.sort(key=lambda r: (-r["score"], r["title"]))
     return results
+
+
+def ranking_settings():
+    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE}
 
 
 
@@ -510,6 +675,7 @@ def health(req: func.HttpRequest):
             "document_count": len(cache["docs"]),
             "loaded_from": cache.get("source"),
             "snapshot_enabled": _snapshot_enabled(),
+            "ranking": ranking_settings(),
         }
     )
 
@@ -552,6 +718,7 @@ def search(req: func.HttpRequest):
             limit = int(body.get("limit", 8))
             full_text = parse_flag(body.get("full_text"), True)
             max_chars = int(body.get("max_chars", 8000))
+            debug = parse_flag(body.get("debug"), False)
         else:
             query = (
                 req.params.get("q")
@@ -561,6 +728,7 @@ def search(req: func.HttpRequest):
             limit = int(req.params.get("limit", 8))
             full_text = parse_flag(req.params.get("full_text"), True)
             max_chars = int(req.params.get("max_chars", 8000))
+            debug = parse_flag(req.params.get("debug"), False)
 
         if not query:
             return respond(
@@ -572,7 +740,8 @@ def search(req: func.HttpRequest):
             return respond({"error": "Query too long"}, 400)
 
         documents()  # load or refresh the wiki and its ranking index
-        results = rank(query)
+        # debug=true adds to each result how its score came about ("why"): the words, the title, the pairs found together.
+        results = rank(query, debug=debug)
         shown = results[: max(1, min(limit, 20))]
         if full_text:
             attach_full_text(shown, max(500, min(max_chars, 30000)))
@@ -581,6 +750,7 @@ def search(req: func.HttpRequest):
             {
                 "query": query,
                 "search_mode": "keyword_bm25",
+                "ranking": ranking_settings(),
                 "full_text": full_text,
                 "count": len(results),
                 "results": shown,
