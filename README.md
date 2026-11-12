@@ -29,6 +29,8 @@ All routes require a Function key and are under `/api`.
 
 Search result fields: `title`, `url`, `source` (`wiki`), `path`, `chunk_id` (the page path), `score`, `snippet`. The response includes `search_mode: keyword_bm25` and `count` (total matches). Scores are decimals that are only meaningful within one response, and they are not comparable with website search scores.
 
+Every result is a different page. A page is a wiki address, so two files in different folders with the same name (which share `.../wiki/Home`), or addresses that differ only in case, a trailing slash or a fragment, come back once, as the better-ranked of them. `count` is the number of different pages that match. `WIKI_UNIQUE_PAGES=false` returns every file.
+
 The snippet is the 1,500-character stretch of the page that holds the most of the question (each different word counted once, by rarity, plus the pairs found together), so on a long FAQ page it is the question and answer that match, not the first place a rare word appears.
 
 Add `debug=true` (or `"debug": true`) and each result gets a `why`: per word its rarity and how often it is in the text and the title, how many words matched, the pairs looked for and found together, and where the excerpt starts. The response and `/health` report `ranking`: the stemmer in use, the phrase boost, and whether the best excerpt is chosen.
@@ -61,6 +63,7 @@ It is checked against the page title and file path. Change it with `WIKI_EXCLUDE
 | `WIKI_EXCLUDE_TITLE_PATTERN` | see above | Pages never returned |
 | `WIKI_STEMMER` | `english` | How words are compared. `prefix` goes back to the first five letters. If the `snowballstemmer` package is missing the app falls back to `prefix` and says so in `/health` |
 | `WIKI_PHRASE_BOOST` | `0.5` | How much a page gains for having the question's words together. `0` turns it off |
+| `WIKI_UNIQUE_PAGES` | `true` | Return each page once. `false` returns every file, even when two share an address |
 | `WIKI_BEST_PASSAGE` | `true` | Choose the excerpt that holds the most of the question. `false` starts at the rarest matching word, as before |
 
 ## Examples

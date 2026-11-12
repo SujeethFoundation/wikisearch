@@ -70,6 +70,10 @@ PHRASE_BOOST = float(os.getenv("WIKI_PHRASE_BOOST", "0.5"))
 # The excerpt shown for a page is the stretch of it that holds the most of the question (true), or the stretch starting at the
 # rarest matched word (false, the old behaviour).
 BEST_PASSAGE = os.getenv("WIKI_BEST_PASSAGE", "true").strip().lower() in ("1", "true", "yes", "on")
+# Every result is a different page. A page is a wiki address, and two files in different folders with the same name share
+# one (".../wiki/Home"), as do addresses that differ only in case or a trailing slash: the better-ranked one is returned,
+# the other is not. WIKI_UNIQUE_PAGES=false returns every file.
+UNIQUE_PAGES = os.getenv("WIKI_UNIQUE_PAGES", "true").strip().lower() in ("1", "true", "yes", "on")
 SNIPPET_CHARS = 1500
 SNIPPET_LEAD = 200
 PAIR_WINDOW = 4  # two of the question's words count as together when at most this many words apart, in order
@@ -321,11 +325,29 @@ def rank(query, debug=False):
             }
         results.append(result)
     results.sort(key=lambda r: (-r["score"], r["title"]))
-    return results
+    return unique_pages(results) if UNIQUE_PAGES else results
+
+
+def page_identity(result):
+    """One key for a page: its address without a trailing slash or fragment, in lower case (its path when it has none)."""
+    url = str(result.get("url") or "").split("#", 1)[0].rstrip("/").lower()
+    return url or str(result.get("path") or "").lower()
+
+
+def unique_pages(results):
+    """The results with each page once, the first (best ranked) of any that share an address."""
+    seen, out = set(), []
+    for item in results:
+        key = page_identity(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def ranking_settings():
-    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE}
+    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES}
 
 
 

@@ -158,9 +158,40 @@ def test_the_routes_report_the_ranking_settings_and_take_debug(monkeypatch):
     monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
     get = lambda params: json.loads(fa.search._function._func(func.HttpRequest("GET", "/api/search", params=params, headers={}, body=b"")).get_body())
     plain = get({"q": "tailor my resume", "full_text": "false"})
-    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True} and "why" not in plain["results"][0]
+    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True} and "why" not in plain["results"][0]
     assert "why" in get({"q": "tailor my resume", "full_text": "false", "debug": "true"})["results"][0]
     post = func.HttpRequest("POST", "/api/search", params={}, headers={}, body=json.dumps({"query": "resume", "debug": True, "full_text": False}).encode())
     assert "why" in json.loads(fa.search._function._func(post).get_body())["results"][0]
     health = json.loads(fa.health._function._func(func.HttpRequest("GET", "/api/health", headers={}, body=b"")).get_body())
     assert health["ranking"]["stemmer"] == "english"
+
+
+# ---- every result is a different page
+
+def test_two_files_with_the_same_address_are_one_page_and_the_better_one_is_returned(monkeypatch):
+    docs = [dict(page("Home", "Mentors and students. Welcome to the career circle wiki."), path="Home.md"),
+            dict(page("Home", "Career circle career circle career circle career circle mentors."), path="archive/Home.md"),
+            page("FAQ-for-Mentors", "Mentors volunteer for the career circle."), page("Other", "Nothing about it.")]
+    use(monkeypatch, docs)
+    paths = order("career circle mentors")
+    homes = [p for p in paths if p.endswith("Home.md")]
+    assert homes == ["archive/Home.md"]                                            # the better-ranked copy, once
+    monkeypatch.setattr(fa, "UNIQUE_PAGES", False)
+    assert len([p for p in order("career circle mentors") if p.endswith("Home.md")]) == 2
+
+
+def test_addresses_that_differ_in_case_a_slash_or_a_fragment_are_one_page():
+    rows = [{"url": "https://github.com/o/r/wiki/Home", "path": "a.md"}, {"url": "https://github.com/o/r/wiki/home/", "path": "b.md"},
+            {"url": "https://github.com/o/r/wiki/Home#intro", "path": "c.md"}, {"url": "https://github.com/o/r/wiki/FAQ", "path": "d.md"},
+            {"url": "", "path": "e.md"}, {"url": "", "path": "E.md"}]
+    assert [r["path"] for r in fa.unique_pages(rows)] == ["a.md", "d.md", "e.md"]
+
+
+def test_the_search_route_returns_five_different_pages(monkeypatch):
+    docs = [page(f"P{i}", "career circle mentors") for i in range(4)] + [dict(page("P0", "career circle"), path="x/P0.md")] * 2
+    use(monkeypatch, docs)
+    monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
+    body = json.loads(fa.search._function._func(func.HttpRequest("GET", "/api/search", params={"q": "career circle", "limit": "8", "full_text": "false"},
+                                                                  headers={}, body=b"")).get_body())
+    urls = [r["url"] for r in body["results"]]
+    assert len(urls) == len(set(urls)) == 4 and body["count"] == 4
