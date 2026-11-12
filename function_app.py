@@ -3,11 +3,13 @@ import logging
 import math
 import os
 import re
+import socket
 import stat
 import tempfile
 import threading
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote
 
@@ -30,6 +32,70 @@ session.headers["User-Agent"] = "SujeethFoundation-ContentSearch/0.1"
 
 if TOKEN:
     session.headers["Authorization"] = f"Bearer {TOKEN}"
+
+
+_PROCESS_STARTED = time.time()
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def _rss_mb():
+    """Resident memory of this process in MB (Linux only; None elsewhere)."""
+    try:
+        return round(int((_read("/proc/self/statm") or "").split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1048576, 1)
+    except Exception:
+        return None
+
+
+def _cgroup():
+    """The container's CPU limit (cores), memory limit (MB) and total time its CPU was throttled, from cgroup v2 or v1.
+    A value the platform does not expose is None, so an unknown limit never reads as 'no limit'."""
+    out = {"cpu_limit_cores": None, "mem_limit_mb": None, "cpu_throttled_seconds": None}
+    try:
+        quota = _read("/sys/fs/cgroup/cpu.max")                       # v2: "max 100000" or "200000 100000"
+        if quota:
+            part = quota.split()
+            if len(part) == 2 and part[0] != "max":
+                out["cpu_limit_cores"] = round(int(part[0]) / int(part[1]), 2)
+        else:                                                         # v1
+            q, p = _read("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"), _read("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+            if q and p and int(q) > 0:
+                out["cpu_limit_cores"] = round(int(q) / int(p), 2)
+        mem = _read("/sys/fs/cgroup/memory.max") or _read("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        if mem and mem.isdigit() and int(mem) < (1 << 50):
+            out["mem_limit_mb"] = round(int(mem) / 1048576)
+        stat = _read("/sys/fs/cgroup/cpu.stat") or _read("/sys/fs/cgroup/cpu/cpu.stat")
+        if stat:
+            vals = dict(line.split()[:2] for line in stat.splitlines() if len(line.split()) >= 2)
+            if "throttled_usec" in vals:
+                out["cpu_throttled_seconds"] = round(int(vals["throttled_usec"]) / 1e6, 2)
+            elif "throttled_time" in vals:
+                out["cpu_throttled_seconds"] = round(int(vals["throttled_time"]) / 1e9, 2)
+    except Exception:
+        pass
+    return out
+
+
+def process_info():
+    """Who is answering, how long it has run, and how much memory and CPU it uses, so a restart shows as a new pid or a
+    drop in uptime and a busy instance shows as CPU time climbing faster than the clock."""
+    return {
+        "pid": os.getpid(),
+        "instance": os.getenv("WEBSITE_INSTANCE_ID") or socket.gethostname(),
+        "started_at": datetime.fromtimestamp(_PROCESS_STARTED, timezone.utc).isoformat(),
+        "uptime_seconds": int(time.time() - _PROCESS_STARTED),
+        "rss_mb": _rss_mb(),
+        "cpu_seconds": round(time.process_time(), 2),   # CPU time used by every thread of this process since it started
+        "cpu_count": os.cpu_count(),
+        **_cgroup(),
+    }
+
 
 cache = {"time": 0, "docs": [], "index": None, "source": None}
 
@@ -697,7 +763,9 @@ def health(req: func.HttpRequest):
             "document_count": len(cache["docs"]),
             "loaded_from": cache.get("source"),
             "snapshot_enabled": _snapshot_enabled(),
+            "cache_age_seconds": int(time.time() - cache["time"]) if cache["time"] else None,
             "ranking": ranking_settings(),
+            "process": process_info(),
         }
     )
 
