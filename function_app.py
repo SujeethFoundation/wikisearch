@@ -119,8 +119,10 @@ STOPWORDS = {
     "their", "then", "there", "these", "they", "this", "those", "to", "us", "was",
     "we", "what", "when", "where", "which", "who", "why", "will", "with", "would",
     "you", "your",
+    # how many, not what: "the agendas for all the weeks" is about agendas and weeks
+    "all", "each", "every",
     # request verbs that start questions but say nothing about the topic
-    "describe", "explain", "give", "please", "show", "tell",
+    "describe", "explain", "please", "show", "tell",
 }
 BM25_K1 = 1.2
 BM25_B = 0.75
@@ -166,6 +168,10 @@ ALSO_MAX = 12
 SYNONYM_FILE = Path(__file__).with_name("synonyms.json")
 SNIPPET_CHARS = 1500
 SNIPPET_LEAD = 200
+# A page with a heading that holds the question's words (an FAQ's "Who are the students?") scores up to 1 + WIKI_HEADING_BOOST
+# times as much; the page's title counts as a heading. 0 turns it off.
+HEADING_BOOST = float(os.getenv("WIKI_HEADING_BOOST", "1.5"))
+HEADING_POWER = 3  # a heading with half the question earns an eighth of the lift: a near miss ("What does the Foundation offer partners?" for a question about books) must not win
 PAIR_WINDOW = 4  # two of the question's words count as together when at most this many words apart, in order
 
 try:
@@ -229,6 +235,19 @@ def page_key(name):
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
 
 
+def heading_stems(text):
+    """The stems of each heading of a page: its "#" lines and the lines that are bold from end to end (an FAQ's questions)."""
+    found = []
+    for line in str(text).splitlines():
+        line = line.strip()
+        bold = re.fullmatch(r"(?:[-*]\s+)?\*\*(.+?)\*\*:?", line)
+        if line.startswith("#") or bold:
+            words = set(stems(plain(bold.group(1) if bold else line.lstrip("#"))))
+            if words:
+                found.append(words)
+    return found
+
+
 def build_index(docs):
     """Precompute term counts for every page. Rebuilt whenever the wiki is reloaded."""
     entries, df = [], Counter()
@@ -248,6 +267,7 @@ def build_index(docs):
             "body_lower": body.lower(),
             "body_tf": body_tf,
             "title_tf": title_tf,
+            "headings": [set(stems(doc["title"]))] + heading_stems(doc["text"]),
             "positions": positions,
             "where": _places(body_stems),
             "length": max(1, len(body_stems)),
@@ -283,8 +303,9 @@ def synonym_map():
 
 
 def query_words(query):
-    """The question's words in lower case, in order."""
-    return re.findall(r"[a-z0-9]+", str(query).lower())
+    """The question's words in lower case, in order. "Give me ..." asks; it says nothing about the topic, so it is left out
+    (a plain "give" stays: "can I give to a program" is about giving)."""
+    return re.findall(r"[a-z0-9]+", re.sub(r"\bgive\s+(me|us)\b", " ", str(query).lower()))
 
 
 def query_stems(query):
@@ -419,10 +440,20 @@ def rank(query, debug=False, also=None):
                 found_extras.append(x)
                 score += ALSO_WEIGHT * idf_of(x) * weighted * (BM25_K1 + 1) / (weighted + BM25_K1 * norm)
         keyword_score = score
+        idf_total = sum(idf.values()) or 1.0
         score *= 0.5 + 0.5 * (len(matched) / len(terms))
         # A page whose title or page name matches the query is probably the target page.
-        title_hits = sum(1 for t in terms if any(entry["title_tf"].get(w) for w in [t] + related[t]))
-        score *= 1 + 1.5 * (title_hits / len(terms))
+        in_title = [t for t in terms if any(entry["title_tf"].get(w) for w in [t] + related[t])]
+        title_hits = len(in_title)
+        title_share = title_hits / len(terms)
+        score *= 1 + 1.5 * title_share
+        # A heading that asks the question (an FAQ's "Who are the students?") marks the part of the page that answers it.
+        heading_share = 0.0
+        if HEADING_BOOST > 0 and len(terms) > 1:
+            for words in entry["headings"]:
+                held = sum(idf[t] for t in terms if t in words or any(x in words for x in related[t]))
+                heading_share = max(heading_share, held / idf_total)
+            score *= 1 + HEADING_BOOST * heading_share ** HEADING_POWER
         # The question's neighbouring words found side by side.
         together = [pair for pair in pairs if pair_places(entry, pair)]
         phrase_share = (sum(pairs[pair] for pair in together) / pair_total) if pair_total > 0 else 0.0
@@ -461,7 +492,8 @@ def rank(query, debug=False, also=None):
                 "words_matched": f"{len(matched)} of {len(terms)}",
                 "found_through_synonyms": dict(via),
                 "found_extra_words": found_extras,
-                "title_share": round(title_hits / len(terms), 2),
+                "title_share": round(title_share, 2),
+                "heading_share": round(heading_share, 2),
                 "pairs_together": [" ".join(pair) for pair in together],
                 "pairs_looked_for": [" ".join(pair) for pair in pairs],
                 "phrase_share": round(phrase_share, 2),
@@ -502,6 +534,7 @@ def apply_hub_boost(results, index, term_count):
     order = {e["doc"]["path"]: e["link_order"] for e in index["entries"]}
     title_hits = {r["path"]: r["_title"] for r in results}
     result_of = {r["path"]: r for r in results}
+    lifted = []
     for r in results:
         children = {by_key[k] for k in links.get(r["path"], ()) if k in by_key} & strong
         children.discard(r["path"])
@@ -509,9 +542,13 @@ def apply_hub_boost(results, index, term_count):
         specific = any(title_hits[c] > r["_title"] for c in children)
         if r["_matched"] >= HUB_MATCH * term_count and len(children) >= HUB_MIN and not specific:
             r["score"] = round(r["score"] * (1 + HUB_BOOST * min(len(children), HUB_FULL) / HUB_FULL), 3)
+            lifted.append((r, children))
             if "why" in r:
                 r["why"]["hub_pages"] = len(children)
             r["_children"] = [by_key[k] for k in order.get(r["path"], ()) if k in by_key and by_key[k] in children]
+    # The overview stays ahead of the pages it gathers (none of them is the one answer), so they are returned together.
+    for r, children in lifted:
+        r["score"] = max(r["score"], round(max(result_of[c]["score"] for c in children) + 0.001, 3))
     for r in results:
         kids = r.pop("_children", None)
         if kids:
@@ -523,34 +560,28 @@ def apply_hub_boost(results, index, term_count):
 
 
 def expand_hubs(results, shown):
-    """`shown` with the pages each overview in it links to (that matched the question) placed right after it, in link order.
-    A page that is already shown moves up to its overview instead of appearing twice. Never more than 20 pages. A page is
-    marked `hub_of` only when its overview is among the pages returned."""
-    out = shown
-    if HUB_EXPAND and any(r.get("hub_pages") for r in shown):
+    """`shown` with the pages its first result links to (that matched the question) placed right after it, in link order,
+    when that first result is an overview. A page that is already shown moves up instead of appearing twice. Never more than
+    20 pages. Only a first result is expanded: an overview further down is beside the point (something else answers the
+    question better), so its pages stay out and it loses its `hub_pages` mark. A page is marked `hub_of` only when its
+    overview is the expanded one."""
+    out = list(shown)
+    lead = shown[0] if HUB_EXPAND and shown and shown[0].get("hub_pages") else None
+    if lead:
         by_url = {r["url"]: r for r in results}
-        out, placed = [], set()
-        for r in shown:
-            if r["url"] in placed:
-                continue
-            out.append(r)
-            placed.add(r["url"])
-            for url in r.get("hub_pages") or ():
-                if url not in placed and url in by_url:
-                    out.append(by_url[url])
-                    placed.add(url)
-        out = out[:20]
-    returned = {r["url"] for r in out}
+        kids = [by_url[url] for url in dict.fromkeys(lead["hub_pages"]) if url in by_url and url != lead["url"]]
+        placed = {lead["url"]} | {r["url"] for r in kids}
+        out = ([lead] + kids + [r for r in shown[1:] if r["url"] not in placed])[:20]
     for r in out:
-        if r.get("hub_of") and (not HUB_EXPAND or r["hub_of"] not in returned):
-            del r["hub_of"]
-        if not HUB_EXPAND:
+        if r is not lead:
             r.pop("hub_pages", None)
+        if r.get("hub_of") and (lead is None or r["hub_of"] != lead["url"]):
+            del r["hub_of"]
     return out
 
 
 def ranking_settings():
-    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST, "hub_expand": HUB_EXPAND, "synonym_weight": SYNONYM_WEIGHT, "also_weight": ALSO_WEIGHT}
+    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST, "hub_expand": HUB_EXPAND, "synonym_weight": SYNONYM_WEIGHT, "also_weight": ALSO_WEIGHT, "heading_boost": HEADING_BOOST}
 
 
 
