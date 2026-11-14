@@ -436,3 +436,8 @@ def test_the_deploy_workflow_ships_the_synonym_file():
     assert workflows and all("synonyms.json" in w.read_text(encoding="utf-8") for w in workflows)
     assert fa.SYNONYM_GROUPS, "synonyms.json did not load"
 
+
+def test_what_a_week_covers_is_its_agenda_in_the_shipped_synonyms():
+    """The Syllabus never says "cover", so "what does each week cover" found it only through this group."""
+    assert "agenda" in fa.synonym_map()[fa.stem("cover")] and fa.stem("covers") == fa.stem("covered") == fa.stem("cover")
+
