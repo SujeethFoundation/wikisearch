@@ -25,7 +25,7 @@ import urllib.request
 
 DEFAULT_URL = "https://wikisearch-gmebdbewaec6axdp.eastus-01.azurewebsites.net"
 HERE = os.path.dirname(os.path.abspath(__file__))
-SETTINGS = {"stemmer": ("STEMMER", str), "phrase_boost": ("PHRASE_BOOST", float),
+SETTINGS = {"stemmer": ("STEMMER", str), "phrase_boost": ("PHRASE_BOOST", float), "heading_boost": ("HEADING_BOOST", float),
             "best_passage": ("BEST_PASSAGE", lambda v: str(v).strip().lower() in ("1", "true", "yes", "on"))}
 
 
@@ -134,7 +134,7 @@ def main(argv=None):
     ap.add_argument("--gold", default=os.path.join(HERE, "relevance_gold.json"))
     ap.add_argument("--local", action="store_true", help="read the wiki from GitHub and rank it here with this checkout's code")
     ap.add_argument("--try", dest="trial", nargs="+", metavar="NAME=VALUE",
-                    help="with --local: a second column with these ranking settings (stemmer, phrase_boost, best_passage)")
+                    help="with --local: a second column with these ranking settings (stemmer, phrase_boost, heading_boost, best_passage)")
     ap.add_argument("--explain", action="store_true", help="for each question not answered first, how the scores came about")
     args = ap.parse_args(argv)
     try:

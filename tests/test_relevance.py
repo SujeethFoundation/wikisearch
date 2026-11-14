@@ -158,7 +158,7 @@ def test_the_routes_report_the_ranking_settings_and_take_debug(monkeypatch):
     monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
     get = lambda params: json.loads(fa.search._function._func(func.HttpRequest("GET", "/api/search", params=params, headers={}, body=b"")).get_body())
     plain = get({"q": "tailor my resume", "full_text": "false"})
-    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5, "hub_expand": True, "synonym_weight": 0.7, "also_weight": 0.4} and "why" not in plain["results"][0]
+    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5, "hub_expand": True, "synonym_weight": 0.7, "also_weight": 0.4, "heading_boost": 1.5} and "why" not in plain["results"][0]
     assert "why" in get({"q": "tailor my resume", "full_text": "false", "debug": "true"})["results"][0]
     post = func.HttpRequest("POST", "/api/search", params={}, headers={}, body=json.dumps({"query": "resume", "debug": True, "full_text": False}).encode())
     assert "why" in json.loads(fa.search._function._func(post).get_body())["results"][0]
@@ -357,3 +357,71 @@ def test_extra_words_can_be_turned_off_and_ignore_the_question_words_and_stop_wo
     assert fa.rank("interviews", also="mock") == fa.rank("interviews")
     use(monkeypatch, docs, SYNONYM_WEIGHT=0)
     assert fa.rank("interviews", also="interviews the and") == fa.rank("interviews")
+
+
+# ---- a heading that asks the question
+
+def faq_wiki():
+    filler = "The program pairs students with mentors for six weeks. " * 6
+    return [
+        page("Overview", "Students join the program each fall. Contact details are on the site. " + filler + "Any question is welcome."),
+        page("FAQ", filler + "\n\n**Who should I contact if I have a question about the program?**\n\nWrite to the coordinator.\n\n"
+                             "### Q: Who are the students?\n\nUndergraduates."),
+        page("Offer", filler + "\n\n**What does the Foundation offer partner institutions?**\n\nA six week program."),
+        page("Books", "The Foundation sends books to students. Each book is one we offer for free. " + filler),
+    ]
+
+
+def test_a_page_whose_heading_asks_the_question_comes_first(monkeypatch):
+    use(monkeypatch, faq_wiki(), HEADING_BOOST=0)
+    assert order("Who do I contact with a question?")[0] == "Overview.md"  # the words, scattered, win without the lift
+    use(monkeypatch, faq_wiki(), HEADING_BOOST=1.5)
+    assert order("Who do I contact with a question?")[0] == "FAQ.md"
+    why = fa.rank("Who do I contact with a question?", debug=True)[0]["why"]
+    assert why["heading_share"] == 1.0
+
+
+def test_a_heading_that_misses_the_question_s_subject_does_not_win(monkeypatch):
+    use(monkeypatch, faq_wiki(), HEADING_BOOST=1.5)
+    assert order("What books does the Foundation offer?")[0] == "Books.md"
+
+
+def test_headings_are_the_hash_lines_the_bold_lines_and_the_title():
+    found = fa.heading_stems("# Partner FAQ\n\n**How long is each session?**\n\nAbout **an hour** each.\n\n### Q: Who are the students?\n- **Agenda**:")
+    assert found == [set(fa.stems("Partner FAQ")), set(fa.stems("How long is each session")), set(fa.stems("Q Who are the students")), {"agenda"}]
+    index = fa.build_index([page("Week-1", "text", title="Week 1: Self Assessment")])
+    assert set(fa.stems("Week 1 Self Assessment")) in index["entries"][0]["headings"]
+
+
+# ---- "give"
+
+def test_give_is_a_topic_word_unless_it_asks(monkeypatch):
+    assert "give" in fa.query_stems("Can I give to a specific program?")
+    assert fa.query_stems("Give me the week 3 agenda") == fa.query_stems("the week 3 agenda")
+    assert fa.query_stems("give us the agenda") == ["agenda"]
+
+
+# ---- the overview, again
+
+def test_the_overview_stays_ahead_of_weeks_whose_headings_ask_the_question(monkeypatch):
+    weeks = [page(f"Week-{n}", f"## Week {n} Agenda\n\nIcebreaker and discussion.", title=f"Week {n}") for n in range(1, 7)]
+    hub = page("Syllabus", "Each week has an agenda. " + " ".join(f"[[Week {n}]] covers goals." for n in range(1, 7)))
+    use(monkeypatch, weeks + [hub], HUB_BOOST=0.5)
+    body = search_route(monkeypatch, {"q": "weekly agendas", "limit": "2", "full_text": "false"})
+    assert [r["path"] for r in body["results"]] == ["Syllabus.md"] + [f"Week-{n}.md" for n in range(1, 7)]
+
+
+def test_an_overview_further_down_does_not_bring_its_pages(monkeypatch):
+    weeks = [page(f"Week-{n}", f"Week {n}: students contribute to the discussion.", title=f"Week {n}") for n in range(1, 7)]
+    hub = page("Overview", "Students contribute each week. " + " ".join(f"[[Week {n}]]" for n in range(1, 7)))
+    donors = page("Donors", "How to donate: donate online. Every donation counts. Donate today.", title="Donate")
+    use(monkeypatch, weeks + [hub, donors], HUB_BOOST=0.5)
+    body = search_route(monkeypatch, {"q": "how do I donate", "limit": "3", "full_text": "false"})
+    assert body["results"][0]["path"] == "Donors.md" and len(body["results"]) == 3
+    assert not any("hub_pages" in r or "hub_of" in r for r in body["results"])
+
+
+def test_how_many_words_are_not_the_topic():
+    assert fa.query_stems("What are the agendas for all the weeks?") == fa.query_stems("agendas weeks")
+    assert fa.query_stems("each") == ["each"]  # a question of nothing else keeps its words
+
