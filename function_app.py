@@ -149,6 +149,11 @@ HUB_BOOST = float(os.getenv("WIKI_HUB_BOOST", "0.5"))
 HUB_FULL = 6
 HUB_MIN = 3  # fewer linked pages than this is a page that merely mentions others, not an overview
 HUB_MATCH = 0.8  # a linked page counts when it holds at least this share of the question's words
+# When an overview page is boosted as the hub of the question, /search also returns the pages it links to that match, right after it
+# and in the order the overview links them ("weekly agendas" -> Weekly Content, then Week 1 ... Week 6), even past `limit`. The hub
+# is marked with `hub_pages` (their addresses) and each of them with `hub_of` (the hub's address), so a caller can keep them together.
+# false returns exactly `limit` results, as before.
+HUB_EXPAND = os.getenv("WIKI_HUB_EXPAND", "true").strip().lower() in ("1", "true", "yes", "on")
 # Words that mean the same ("prep" and "prepare", "fee" and "cost") are listed in synonyms.json, one group per line. A page that has
 # a synonym of a question word counts for that word, at WIKI_SYNONYM_WEIGHT of what the word itself would give (the page's best
 # match for each word counts, not the sum). 0 turns synonyms off.
@@ -248,6 +253,7 @@ def build_index(docs):
             "length": max(1, len(body_stems)),
             "key": page_key(doc["path"].rsplit(".", 1)[0]),
             "links": {page_key(m.split("|")[0]) for m in re.findall(r"\[\[([^\]]+)\]\]", doc["text"])},
+            "link_order": list(dict.fromkeys(page_key(m.split("|")[0]) for m in re.findall(r"\[\[([^\]]+)\]\]", doc["text"]))),
         })
     average = sum(e["length"] for e in entries) / len(entries) if entries else 1.0
     return {"entries": entries, "df": df, "average_length": average}
@@ -487,11 +493,14 @@ def unique_pages(results):
 
 
 def apply_hub_boost(results, index, term_count):
-    """Lift a page that links to pages that match the question too: it is their overview."""
+    """Lift a page that links to pages that match the question too: it is their overview. The overview is marked with the
+    addresses of those pages (`hub_pages`, in the order it links them) and each of them with the overview's (`hub_of`)."""
     by_key = {e["key"]: e["doc"]["path"] for e in index["entries"]}
     strong = {r["path"] for r in results if r["_matched"] >= HUB_MATCH * term_count}
     links = {e["doc"]["path"]: e["links"] for e in index["entries"]}
+    order = {e["doc"]["path"]: e["link_order"] for e in index["entries"]}
     title_hits = {r["path"]: r["_title"] for r in results}
+    result_of = {r["path"]: r for r in results}
     for r in results:
         children = {by_key[k] for k in links.get(r["path"], ()) if k in by_key} & strong
         children.discard(r["path"])
@@ -501,13 +510,46 @@ def apply_hub_boost(results, index, term_count):
             r["score"] = round(r["score"] * (1 + HUB_BOOST * min(len(children), HUB_FULL) / HUB_FULL), 3)
             if "why" in r:
                 r["why"]["hub_pages"] = len(children)
+            r["_children"] = [by_key[k] for k in order.get(r["path"], ()) if k in by_key and by_key[k] in children]
     for r in results:
+        kids = r.pop("_children", None)
+        if kids:
+            r["hub_pages"] = [result_of[c]["url"] for c in kids]
+            for c in kids:
+                result_of[c].setdefault("hub_of", r["url"])
         r.pop("_matched", None)
         r.pop("_title", None)
 
 
+def expand_hubs(results, shown):
+    """`shown` with the pages each overview in it links to (that matched the question) placed right after it, in link order.
+    A page that is already shown moves up to its overview instead of appearing twice. Never more than 20 pages. A page is
+    marked `hub_of` only when its overview is among the pages returned."""
+    out = shown
+    if HUB_EXPAND and any(r.get("hub_pages") for r in shown):
+        by_url = {r["url"]: r for r in results}
+        out, placed = [], set()
+        for r in shown:
+            if r["url"] in placed:
+                continue
+            out.append(r)
+            placed.add(r["url"])
+            for url in r.get("hub_pages") or ():
+                if url not in placed and url in by_url:
+                    out.append(by_url[url])
+                    placed.add(url)
+        out = out[:20]
+    returned = {r["url"] for r in out}
+    for r in out:
+        if r.get("hub_of") and (not HUB_EXPAND or r["hub_of"] not in returned):
+            del r["hub_of"]
+        if not HUB_EXPAND:
+            r.pop("hub_pages", None)
+    return out
+
+
 def ranking_settings():
-    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST, "synonym_weight": SYNONYM_WEIGHT, "also_weight": ALSO_WEIGHT}
+    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST, "hub_expand": HUB_EXPAND, "synonym_weight": SYNONYM_WEIGHT, "also_weight": ALSO_WEIGHT}
 
 
 
@@ -961,7 +1003,7 @@ def search(req: func.HttpRequest):
         documents()  # load or refresh the wiki and its ranking index
         # debug=true adds to each result how its score came about ("why"): the words, the title, the pairs found together.
         results = rank(query, debug=debug, also=also)
-        shown = results[: max(1, min(limit, 20))]
+        shown = expand_hubs(results, results[: max(1, min(limit, 20))])
         if full_text:
             attach_full_text(shown, max(500, min(max_chars, 30000)))
 
