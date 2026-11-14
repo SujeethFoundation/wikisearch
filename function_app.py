@@ -153,6 +153,11 @@ HUB_MATCH = 0.8  # a linked page counts when it holds at least this share of the
 # a synonym of a question word counts for that word, at WIKI_SYNONYM_WEIGHT of what the word itself would give (the page's best
 # match for each word counts, not the sum). 0 turns synonyms off.
 SYNONYM_WEIGHT = float(os.getenv("WIKI_SYNONYM_WEIGHT", "0.7"))
+# A caller that knows more about the question than its words (the MCP server's ontology match) can pass extra words with
+# `also`. They only add to the score, at WIKI_ALSO_WEIGHT each: they are not part of the question, so a page without them
+# is not marked down, and a page that matches none of the question's own words is not returned for them.
+ALSO_WEIGHT = float(os.getenv("WIKI_ALSO_WEIGHT", "0.4"))
+ALSO_MAX = 12
 SYNONYM_FILE = Path(__file__).with_name("synonyms.json")
 SNIPPET_CHARS = 1500
 SNIPPET_LEAD = 200
@@ -362,7 +367,7 @@ def best_passage(entry, idf, pairs):
     return best[1], max(0.0, min(1.0, best[2]))
 
 
-def rank(query, debug=False):
+def rank(query, debug=False, also=None):
     """Return every matching page, best first. debug=True adds to each result how its score came about."""
     index = cache.get("index") or build_index(cache["docs"])
     terms = query_stems(query)
@@ -371,6 +376,8 @@ def rank(query, debug=False):
     n = len(index["entries"])
     synonyms = synonym_map() if SYNONYM_WEIGHT > 0 else {}
     related = {t: sorted(synonyms.get(t, ())) for t in terms}
+    extras = [x for x in dict.fromkeys(stem(w) for w in query_words(" ".join(also) if isinstance(also, (list, tuple)) else str(also or "")))
+              if x not in terms and x not in STOPWORDS][:ALSO_MAX] if ALSO_WEIGHT > 0 else []
     idf_of = lambda t: math.log(1 + (n - index["df"].get(t, 0) + 0.5) / (index["df"].get(t, 0) + 0.5))
     idf = {t: idf_of(t) for t in terms}
     pairs = query_pairs(query, index) if PHRASE_BOOST > 0 or BEST_PASSAGE else {}
@@ -398,6 +405,12 @@ def rank(query, debug=False):
             score += best
         if not matched:
             continue
+        found_extras = []
+        for x in extras:
+            weighted = entry["body_tf"].get(x, 0) + TITLE_BOOST * entry["title_tf"].get(x, 0)
+            if weighted:
+                found_extras.append(x)
+                score += ALSO_WEIGHT * idf_of(x) * weighted * (BM25_K1 + 1) / (weighted + BM25_K1 * norm)
         keyword_score = score
         score *= 0.5 + 0.5 * (len(matched) / len(terms))
         # A page whose title or page name matches the query is probably the target page.
@@ -440,6 +453,7 @@ def rank(query, debug=False):
                 "keyword_score": round(keyword_score, 3),
                 "words_matched": f"{len(matched)} of {len(terms)}",
                 "found_through_synonyms": dict(via),
+                "found_extra_words": found_extras,
                 "title_share": round(title_hits / len(terms), 2),
                 "pairs_together": [" ".join(pair) for pair in together],
                 "pairs_looked_for": [" ".join(pair) for pair in pairs],
@@ -493,7 +507,7 @@ def apply_hub_boost(results, index, term_count):
 
 
 def ranking_settings():
-    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST, "synonym_weight": SYNONYM_WEIGHT}
+    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST, "synonym_weight": SYNONYM_WEIGHT, "also_weight": ALSO_WEIGHT}
 
 
 
@@ -922,6 +936,7 @@ def search(req: func.HttpRequest):
             full_text = parse_flag(body.get("full_text"), True)
             max_chars = int(body.get("max_chars", 8000))
             debug = parse_flag(body.get("debug"), False)
+            also = body.get("also")
         else:
             query = (
                 req.params.get("q")
@@ -932,6 +947,7 @@ def search(req: func.HttpRequest):
             full_text = parse_flag(req.params.get("full_text"), True)
             max_chars = int(req.params.get("max_chars", 8000))
             debug = parse_flag(req.params.get("debug"), False)
+            also = req.params.get("also")
 
         if not query:
             return respond(
@@ -944,7 +960,7 @@ def search(req: func.HttpRequest):
 
         documents()  # load or refresh the wiki and its ranking index
         # debug=true adds to each result how its score came about ("why"): the words, the title, the pairs found together.
-        results = rank(query, debug=debug)
+        results = rank(query, debug=debug, also=also)
         shown = results[: max(1, min(limit, 20))]
         if full_text:
             attach_full_text(shown, max(500, min(max_chars, 30000)))
