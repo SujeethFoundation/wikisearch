@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -987,6 +989,40 @@ def document(req: func.HttpRequest):
     except Exception:
         logging.exception("Document lookup failed")
         return respond({"error": "Unexpected server error"}, 500)
+
+
+WEBHOOK_SECRET = os.getenv("WIKI_WEBHOOK_SECRET", "")
+
+
+def webhook_signature_ok(body, header):
+    """True when `header` (GitHub's X-Hub-Signature-256) is the HMAC-SHA256 of the body under WIKI_WEBHOOK_SECRET."""
+    if not WEBHOOK_SECRET or not header:
+        return False
+    expected = "sha256=" + hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header.strip())
+
+
+@app.route(route="wiki-webhook", methods=["POST"])
+def wiki_webhook(req: func.HttpRequest):
+    """A GitHub webhook for the wiki ("Gollum" event: a page was created or edited). Starts a refresh and answers at once."""
+    if not WEBHOOK_SECRET:
+        return respond({"error": "WIKI_WEBHOOK_SECRET is not set"}, 503)
+    if not webhook_signature_ok(req.get_body(), req.headers.get("X-Hub-Signature-256", "")):
+        return respond({"error": "Bad signature"}, 401)
+    event = req.headers.get("X-GitHub-Event", "")
+    if event == "ping":
+        return respond({"status": "pong"})
+    if event != "gollum":
+        return respond({"status": "ignored", "event": event})
+
+    def work():
+        try:
+            documents(force=True)
+        except Exception:
+            logging.exception("Webhook refresh failed; the older copy stays in use")
+
+    threading.Thread(target=work, name="wiki-webhook-refresh", daemon=True).start()
+    return respond({"status": "refresh started"}, 202)
 
 
 @app.route(route="refresh", methods=["POST"])

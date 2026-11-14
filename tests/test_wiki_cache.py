@@ -275,6 +275,52 @@ def test_health_reports_where_the_copy_came_from(monkeypatch):
     assert body["cache_loaded"] is True and body["loaded_from"] == "github" and body["snapshot_enabled"] is False
 
 
+# ---- the GitHub wiki webhook ----
+
+import hashlib
+import hmac
+import json
+
+import azure.functions as func
+
+
+def hook(monkeypatch, body=b"{}", event="gollum", secret="s3cret", sign=True, signature=None):
+    monkeypatch.setattr(fa, "WEBHOOK_SECRET", secret)
+    sig = signature if signature is not None else "sha256=" + hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
+    headers = {"X-GitHub-Event": event}
+    if sign:
+        headers["X-Hub-Signature-256"] = sig
+    response = fa.wiki_webhook._function._func(func.HttpRequest("POST", "/api/wiki-webhook", headers=headers, body=body))
+    return response.status_code, json.loads(response.get_body())
+
+
+def test_a_signed_gollum_event_starts_a_refresh(monkeypatch):
+    reader = Reader(docs=make_docs(2, "new"))
+    monkeypatch.setattr(fa, "read_wiki", reader)
+    monkeypatch.setattr(fa, "_snapshot_load", lambda: None)
+    status, body = hook(monkeypatch)
+    assert status == 202 and body["status"] == "refresh started"
+    assert wait_for(lambda: reader.calls == 1 and fa.cache["source"] == "github")
+
+
+def test_the_webhook_answers_ping_and_ignores_other_events_without_reading(monkeypatch):
+    reader = Reader()
+    monkeypatch.setattr(fa, "read_wiki", reader)
+    assert hook(monkeypatch, event="ping") == (200, {"status": "pong"})
+    assert hook(monkeypatch, event="push")[1]["status"] == "ignored"
+    time.sleep(0.1)
+    assert reader.calls == 0
+
+
+def test_the_webhook_refuses_bad_missing_or_unconfigured_signatures(monkeypatch):
+    reader = Reader()
+    monkeypatch.setattr(fa, "read_wiki", reader)
+    assert hook(monkeypatch, signature="sha256=00")[0] == 401
+    assert hook(monkeypatch, sign=False)[0] == 401
+    assert hook(monkeypatch, body=b'{"a":1}', signature="sha256=" + hmac.new(b"s3cret", b"{}", hashlib.sha256).hexdigest())[0] == 401
+    assert hook(monkeypatch, secret="")[0] == 503
+    time.sleep(0.1)
+    assert reader.calls == 0
 # ---- a refresh that finds the wiki unchanged skips the clone ----
 
 def loaded_at(monkeypatch, head, remote):
