@@ -158,7 +158,7 @@ def test_the_routes_report_the_ranking_settings_and_take_debug(monkeypatch):
     monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
     get = lambda params: json.loads(fa.search._function._func(func.HttpRequest("GET", "/api/search", params=params, headers={}, body=b"")).get_body())
     plain = get({"q": "tailor my resume", "full_text": "false"})
-    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5} and "why" not in plain["results"][0]
+    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5, "synonym_weight": 0.7} and "why" not in plain["results"][0]
     assert "why" in get({"q": "tailor my resume", "full_text": "false", "debug": "true"})["results"][0]
     post = func.HttpRequest("POST", "/api/search", params={}, headers={}, body=json.dumps({"query": "resume", "debug": True, "full_text": False}).encode())
     assert "why" in json.loads(fa.search._function._func(post).get_body())["results"][0]
@@ -231,3 +231,35 @@ def test_the_overview_boost_can_be_turned_off_and_needs_three_linked_pages(monke
 
 def test_give_is_a_request_word_not_a_topic(monkeypatch):
     assert fa.query_stems("can you give me the weekly agendas?") == fa.query_stems("weekly agendas")
+
+
+# ---- synonyms
+
+def test_a_page_with_a_synonym_of_the_question_word_is_found(monkeypatch):
+    docs = [page("Resources", "Download the slides and templates here."), page("Other", "Nothing relevant to see.")]
+    use(monkeypatch, docs, SYNONYM_GROUPS=[["material", "slide"]], SYNONYM_WEIGHT=0.7)
+    assert order("weekly materials") == ["Resources.md"]
+    use(monkeypatch, docs, SYNONYM_GROUPS=[["material", "slide"]], SYNONYM_WEIGHT=0)
+    assert order("weekly materials") == []
+
+
+def test_the_word_itself_beats_its_synonym_and_both_directions_work(monkeypatch):
+    docs = [page("Exact", "The cost of the program."), page("Synonym", "The fee for the program.")]
+    use(monkeypatch, docs, SYNONYM_GROUPS=[["cost", "fee", "price"]], SYNONYM_WEIGHT=0.7)
+    assert order("cost") == ["Exact.md", "Synonym.md"]
+    assert order("fee") == ["Synonym.md", "Exact.md"]
+    assert fa.rank("cost", debug=True)[1]["why"]["found_through_synonyms"] == {"cost": "fee"}
+
+
+def test_synonyms_count_a_word_once_not_once_per_synonym(monkeypatch):
+    docs = [page("Many", "cost fee price cost fee price"), page("Both", "cost and the program schedule")]
+    use(monkeypatch, docs, SYNONYM_GROUPS=[["cost", "fee", "price"]], SYNONYM_WEIGHT=0.7)
+    assert fa.rank("cost", debug=True)[0]["why"]["words_matched"] == "1 of 1"
+
+
+def test_synonyms_json_is_valid_and_a_broken_file_means_none(tmp_path):
+    groups = fa.load_synonym_groups()
+    assert len(groups) > 5 and all(isinstance(g, list) and len(g) > 1 and all(" " not in w for w in g) for g in groups)
+    (tmp_path / "bad.json").write_text("{not json")
+    assert fa.load_synonym_groups(tmp_path / "bad.json") == []
+    assert fa.load_synonym_groups(tmp_path / "missing.json") == []

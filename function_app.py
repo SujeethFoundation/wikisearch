@@ -149,6 +149,11 @@ HUB_BOOST = float(os.getenv("WIKI_HUB_BOOST", "0.5"))
 HUB_FULL = 6
 HUB_MIN = 3  # fewer linked pages than this is a page that merely mentions others, not an overview
 HUB_MATCH = 0.8  # a linked page counts when it holds at least this share of the question's words
+# Words that mean the same ("prep" and "prepare", "fee" and "cost") are listed in synonyms.json, one group per line. A page that has
+# a synonym of a question word counts for that word, at WIKI_SYNONYM_WEIGHT of what the word itself would give (the page's best
+# match for each word counts, not the sum). 0 turns synonyms off.
+SYNONYM_WEIGHT = float(os.getenv("WIKI_SYNONYM_WEIGHT", "0.7"))
+SYNONYM_FILE = Path(__file__).with_name("synonyms.json")
 SNIPPET_CHARS = 1500
 SNIPPET_LEAD = 200
 PAIR_WINDOW = 4  # two of the question's words count as together when at most this many words apart, in order
@@ -241,6 +246,29 @@ def build_index(docs):
         })
     average = sum(e["length"] for e in entries) / len(entries) if entries else 1.0
     return {"entries": entries, "df": df, "average_length": average}
+
+
+def load_synonym_groups(path=None):
+    """The groups of words in synonyms.json, as lists of lower-case words. A missing or broken file means no synonyms."""
+    try:
+        data = json.loads(Path(path or SYNONYM_FILE).read_text(encoding="utf-8"))
+        return [[str(w).lower() for w in g if str(w).strip()] for g in data.get("groups", []) if isinstance(g, list)]
+    except Exception:
+        logging.warning("Could not read synonyms.json; searching without synonyms")
+        return []
+
+
+SYNONYM_GROUPS = load_synonym_groups()
+
+
+def synonym_map():
+    """{stem: stems that mean the same}, from SYNONYM_GROUPS. A word never counts as its own synonym."""
+    found = {}
+    for group in SYNONYM_GROUPS:
+        group_stems = list(dict.fromkeys(stem(w) for w in group))
+        for st in group_stems:
+            found.setdefault(st, set()).update(x for x in group_stems if x != st)
+    return found
 
 
 def query_words(query):
@@ -341,28 +369,39 @@ def rank(query, debug=False):
     if not terms or not index["entries"]:
         return []
     n = len(index["entries"])
-    idf = {
-        t: math.log(1 + (n - index["df"].get(t, 0) + 0.5) / (index["df"].get(t, 0) + 0.5))
-        for t in terms
-    }
+    synonyms = synonym_map() if SYNONYM_WEIGHT > 0 else {}
+    related = {t: sorted(synonyms.get(t, ())) for t in terms}
+    idf_of = lambda t: math.log(1 + (n - index["df"].get(t, 0) + 0.5) / (index["df"].get(t, 0) + 0.5))
+    idf = {t: idf_of(t) for t in terms}
     pairs = query_pairs(query, index) if PHRASE_BOOST > 0 or BEST_PASSAGE else {}
     pair_total = sum(pairs.values())
     results = []
     for entry in index["entries"]:
-        score, matched = 0.0, []
+        score, matched, via = 0.0, [], {}
+        norm = 1 - BM25_B + BM25_B * entry["length"] / index["average_length"]
         for t in terms:
-            weighted = entry["body_tf"].get(t, 0) + TITLE_BOOST * entry["title_tf"].get(t, 0)
-            if not weighted:
+            best = 0.0
+            for word, factor in [(t, 1.0)] + [(x, SYNONYM_WEIGHT) for x in related[t]]:
+                weighted = entry["body_tf"].get(word, 0) + TITLE_BOOST * entry["title_tf"].get(word, 0)
+                if not weighted:
+                    continue
+                part = factor * idf_of(word) * weighted * (BM25_K1 + 1) / (weighted + BM25_K1 * norm)
+                if part > best:
+                    best = part
+                    if word != t:
+                        via[t] = word
+                    else:
+                        via.pop(t, None)
+            if not best:
                 continue
             matched.append(t)
-            norm = 1 - BM25_B + BM25_B * entry["length"] / index["average_length"]
-            score += idf[t] * weighted * (BM25_K1 + 1) / (weighted + BM25_K1 * norm)
+            score += best
         if not matched:
             continue
         keyword_score = score
         score *= 0.5 + 0.5 * (len(matched) / len(terms))
         # A page whose title or page name matches the query is probably the target page.
-        title_hits = sum(1 for t in terms if entry["title_tf"].get(t))
+        title_hits = sum(1 for t in terms if any(entry["title_tf"].get(w) for w in [t] + related[t]))
         score *= 1 + 1.5 * (title_hits / len(terms))
         # The question's neighbouring words found side by side.
         together = [pair for pair in pairs if pair_places(entry, pair)]
@@ -400,6 +439,7 @@ def rank(query, debug=False):
                           for t in terms},
                 "keyword_score": round(keyword_score, 3),
                 "words_matched": f"{len(matched)} of {len(terms)}",
+                "found_through_synonyms": dict(via),
                 "title_share": round(title_hits / len(terms), 2),
                 "pairs_together": [" ".join(pair) for pair in together],
                 "pairs_looked_for": [" ".join(pair) for pair in pairs],
@@ -453,7 +493,7 @@ def apply_hub_boost(results, index, term_count):
 
 
 def ranking_settings():
-    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST}
+    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST, "synonym_weight": SYNONYM_WEIGHT}
 
 
 
