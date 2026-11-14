@@ -40,7 +40,7 @@
   {"question": "How do I find my purpose?", "expect": ["Week-2", "Purpose-Driven-Approach", "Additional-Resources"], "passage": ["Purpose"]},
   {"question": "What is the power of appreciation?", "expect": ["Power-of-Appreciation"]},
   {"question": "What happened in the 2025 program year?", "expect": ["FAQ-for-Donors"], "passage": ["2025 program year"]},
-  {"question": "Where are the weekly materials?", "expect": ["Weekly-Content", "Home"]},
+  {"question": "Where are the weekly materials?", "expect": ["Syllabus", "Weekly-Content", "Home"]},
   {"question": "What experience do volunteer mentors need?", "expect": ["FAQ-for-Partners", "FAQ-for-Mentors"], "passage": ["experience does the Foundation look for", "Who can volunteer"]},
   {"question": "How do I reach out to a professional?", "expect": ["FAQ-for-Students", "Week-4"], "passage": ["reach out to a professional"]}
 ]

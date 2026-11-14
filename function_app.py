@@ -398,7 +398,8 @@ def rank(query, debug=False, also=None):
                 weighted = entry["body_tf"].get(word, 0) + TITLE_BOOST * entry["title_tf"].get(word, 0)
                 if not weighted:
                     continue
-                part = factor * idf_of(word) * weighted * (BM25_K1 + 1) / (weighted + BM25_K1 * norm)
+                # A synonym counts for the question's word, so it is as rare as that word (a rare synonym must not outscore the word itself).
+                part = factor * idf_of(t) * weighted * (BM25_K1 + 1) / (weighted + BM25_K1 * norm)
                 if part > best:
                     best = part
                     if word != t:

@@ -275,6 +275,31 @@ def test_an_expanded_page_that_is_already_shown_appears_once(monkeypatch):
     assert len(paths) == len(set(paths)) and paths[:7] == ["Weekly-Content.md"] + [f"Week-{n}.md" for n in range(1, 7)]
 
 
+def syllabus_wiki():
+    """The overview is titled Syllabus, a word the weeks never use; "syllabus" and "agenda" are synonyms."""
+    weeks = [page(f"Week-{n}", f"Week {n} agenda: icebreaker and discussion.", title=f"Week {n}") for n in range(1, 7)]
+    hub = page("Syllabus", "Each week has an agenda. " + " ".join(f"The agenda covers week {n} goals. [[Week {n}]]" for n in range(1, 7)))
+    return weeks + [hub]
+
+
+def test_a_rare_synonym_does_not_outscore_the_word_it_stands_for(monkeypatch):
+    monkeypatch.setattr(fa, "SYNONYM_GROUPS", [["agenda", "syllabus"]])
+    common = [page(f"Notes-{n}", "Notes with an agenda for the meeting.") for n in range(6)]
+    with_word = page("With-Word", "Notes with an agenda for the meeting.")
+    with_synonym = page("With-Synonym", "Notes with a syllabus for the meeting.")  # "syllabus" is on one page only, so it is rarer
+    use(monkeypatch, common + [with_synonym, with_word])
+    scores = {r["path"]: r["score"] for r in fa.rank("agenda")}
+    # a page that has only the synonym counts for the word at SYNONYM_WEIGHT of what the word itself gives
+    assert scores["With-Word.md"] > scores["With-Synonym.md"] > 0
+
+
+def test_a_question_in_a_synonym_of_the_agenda_reaches_the_weeks_through_the_overview(monkeypatch):
+    monkeypatch.setattr(fa, "SYNONYM_GROUPS", [["agenda", "syllabus"]])
+    use(monkeypatch, syllabus_wiki(), HUB_BOOST=0.5)
+    body = search_route(monkeypatch, {"q": "what is the syllabus", "limit": "2", "full_text": "false"})
+    assert [r["path"] for r in body["results"]] == ["Syllabus.md"] + [f"Week-{n}.md" for n in range(1, 7)]
+
+
 def test_give_is_a_request_word_not_a_topic(monkeypatch):
     assert fa.query_stems("can you give me the weekly agendas?") == fa.query_stems("weekly agendas")
 
