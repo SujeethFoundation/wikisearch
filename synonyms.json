@@ -1,23 +1,31 @@
 {
-  "_about": "Words that mean the same thing for the wiki search. Each group is a list; any word in it finds pages that use any other. One word per entry (no phrases). Plural and verb forms need no entry: the stemmer already joins them. Edit freely; no code change needed.",
+  "_about": "Words that mean the same thing for the wiki search. Each group is a list; any word in it finds pages that use any other. One word per entry (no phrases). Plural and verb forms need no entry: the stemmer already joins them. Edit freely; no code change needed. Several groups come from the single-word aliases in the ontology (ontology/ontology.json); add a word there first, and copy it here only when it is a true single-word synonym.",
   "groups": [
     ["prep", "prepare", "readiness"],
     ["cost", "fee", "price", "tuition"],
-    ["donate", "gift", "contribute"],
-    ["mentor", "coach", "advisor", "adviser"],
+    ["donate", "gift", "contribute", "giving", "gofundme"],
+    ["mentor", "coach", "advisor", "adviser", "facilitator"],
     ["student", "mentee", "participant"],
     ["resume", "cv"],
     ["job", "employment", "position"],
     ["internship", "intern"],
     ["agenda", "schedule", "outline"],
     ["material", "resource", "handout", "template", "slide", "download"],
-    ["salary", "compensation", "wage", "pay"],
+    ["salary", "compensation", "wage", "pay", "counteroffer"],
     ["register", "enroll", "signup", "join"],
     ["withdraw", "quit", "drop"],
     ["online", "virtual", "zoom", "remote"],
     ["goal", "objective", "aim"],
-    ["circle", "club", "cohort"],
+    ["club", "cohort"],
     ["recording", "video", "replay"],
-    ["email", "message", "newsletter"]
+    ["email", "message", "newsletter"],
+    ["presentation", "deck"],
+    ["donor", "supporter", "sponsor"],
+    ["leadership", "leader"],
+    ["grit", "perseverance", "persistence", "resilience"],
+    ["innovation", "experimentation"],
+    ["appreciation", "gratitude", "recognition", "acknowledgment"],
+    ["statistics", "stats", "nps"],
+    ["vulnerability", "shame"]
   ]
 }
