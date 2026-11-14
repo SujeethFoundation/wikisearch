@@ -104,5 +104,10 @@
   {"question": "Give me the week 3 agenda", "expect": ["Week-3"]},
   {"question": "Can I give monthly?", "expect": ["FAQ-for-Donors"]},
   {"question": "What are the agendas for all the weeks?", "expect": ["Syllabus"]},
-  {"question": "What happens each week?", "expect": ["FAQ-for-Mentors", "Syllabus"]}
+  {"question": "What happens each week?", "expect": ["FAQ-for-Mentors", "Syllabus"]},
+  {"question": "What does each week cover?", "expect": ["Syllabus", "Week-"]},
+  {"question": "What is covered each week?", "expect": ["Syllabus"]},
+  {"question": "What topics does the program cover?", "expect": ["Program-Overview", "Syllabus", "FAQ-for-Students", "Home"]},
+  {"question": "What does week 3 cover?", "expect": ["Week-3"]},
+  {"question": "What does the program cover?", "expect": ["Program-Overview", "Syllabus", "Home", "FAQ-for-Students"]}
 ]
