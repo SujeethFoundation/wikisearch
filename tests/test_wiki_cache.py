@@ -130,7 +130,7 @@ def test_a_stale_snapshot_is_served_at_once_then_refreshed_in_the_background(mon
     saved = []
     monkeypatch.setattr(fa, "read_wiki", reader)
     monkeypatch.setattr(fa, "SNAPSHOT_CONNECTION", "x")
-    monkeypatch.setattr(fa, "_snapshot_save", lambda docs, at: saved.append(docs))
+    monkeypatch.setattr(fa, "_snapshot_save", lambda docs, at, head=None: saved.append(docs))
     monkeypatch.setattr(fa, "_snapshot_load", lambda: (make_docs(3, "old"), time.time() - fa.CACHE_SECONDS - 100))
     first = fa.documents()
     assert len(first) == 3 and reader.calls == 0           # served without waiting for GitHub
@@ -145,7 +145,7 @@ def test_a_read_from_github_saves_the_snapshot(monkeypatch):
     monkeypatch.setattr(fa, "read_wiki", Reader(docs=make_docs(2, "g")))
     monkeypatch.setattr(fa, "SNAPSHOT_CONNECTION", "x")
     monkeypatch.setattr(fa, "_snapshot_load", lambda: None)
-    monkeypatch.setattr(fa, "_snapshot_save", lambda docs, at: saved.append((docs, at)))
+    monkeypatch.setattr(fa, "_snapshot_save", lambda docs, at, head=None: saved.append((docs, at)))
     fa.documents()
     assert wait_for(lambda: len(saved) == 1)
     assert saved[0][0][0]["title"].endswith("g") and abs(saved[0][1] - time.time()) < 5
@@ -156,7 +156,7 @@ def test_without_a_usable_snapshot_it_reads_github_as_before(monkeypatch):
     monkeypatch.setattr(fa, "read_wiki", reader)
     monkeypatch.setattr(fa, "SNAPSHOT_CONNECTION", "x")
     monkeypatch.setattr(fa, "_snapshot_load", lambda: None)
-    monkeypatch.setattr(fa, "_snapshot_save", lambda docs, at: None)
+    monkeypatch.setattr(fa, "_snapshot_save", lambda docs, at, head=None: None)
     assert len(fa.documents()) == 2 and reader.calls == 1 and fa.cache["source"] == "github"
 
 
@@ -165,7 +165,7 @@ def test_a_forced_refresh_reads_github_even_when_a_snapshot_exists(monkeypatch):
     monkeypatch.setattr(fa, "read_wiki", reader)
     monkeypatch.setattr(fa, "SNAPSHOT_CONNECTION", "x")
     monkeypatch.setattr(fa, "_snapshot_load", lambda: (make_docs(5), time.time()))
-    monkeypatch.setattr(fa, "_snapshot_save", lambda docs, at: None)
+    monkeypatch.setattr(fa, "_snapshot_save", lambda docs, at, head=None: None)
     assert len(fa.documents(force=True)) == 2 and reader.calls == 1
 
 
@@ -273,3 +273,57 @@ def test_health_reports_where_the_copy_came_from(monkeypatch):
     req = func.HttpRequest("GET", "/api/health", headers={}, body=b"")
     body = json.loads(fa.health._function._func(req).get_body())
     assert body["cache_loaded"] is True and body["loaded_from"] == "github" and body["snapshot_enabled"] is False
+
+
+# ---- a refresh that finds the wiki unchanged skips the clone ----
+
+def loaded_at(monkeypatch, head, remote):
+    """Load once from a stand-in GitHub whose latest commit is `head`, then report `remote` as GitHub's latest commit."""
+    reader = Reader(docs=make_docs(2, "g"))
+    monkeypatch.setattr(fa, "read_wiki", lambda: (fa._read_head.update(sha=head), reader())[1])
+    monkeypatch.setattr(fa, "_snapshot_load", lambda: None)
+    fa.documents()
+    assert fa.cache["head"] == head and reader.calls == 1
+    monkeypatch.setattr(fa, "remote_head", lambda: remote)
+    return reader
+
+
+def test_an_unchanged_wiki_is_not_cloned_again(monkeypatch):
+    reader = loaded_at(monkeypatch, "abc", "abc")
+    fa.cache["time"] = time.time() - fa.CACHE_SECONDS - 1                  # stale
+    fa.documents()                                                          # starts the background refresh
+    assert wait_for(lambda: time.time() - fa.cache["time"] < 5)             # the clock restarted...
+    assert reader.calls == 1 and fa.cache["head"] == "abc"                  # ...without a second read
+
+
+@pytest.mark.parametrize("remote", ["def", None])
+def test_a_changed_wiki_or_an_unreachable_check_reads_it_again(monkeypatch, remote):
+    reader = loaded_at(monkeypatch, "abc", remote)
+    fa.cache["time"] = time.time() - fa.CACHE_SECONDS - 1
+    fa.documents()
+    assert wait_for(lambda: reader.calls == 2)
+
+
+def test_a_forced_refresh_always_reads_and_the_skip_can_be_turned_off(monkeypatch):
+    reader = loaded_at(monkeypatch, "abc", "abc")
+    fa.documents(force=True)
+    assert reader.calls == 2
+    monkeypatch.setattr(fa, "SKIP_UNCHANGED", False)
+    fa.cache["time"] = time.time() - fa.CACHE_SECONDS - 1
+    fa.documents()
+    assert wait_for(lambda: reader.calls == 3)
+
+
+def test_the_snapshot_remembers_the_commit_so_a_new_instance_can_skip_the_clone(monkeypatch):
+    def load():
+        fa._snapshot_head["sha"] = "abc"
+        return make_docs(3, "snap"), time.time() - fa.CACHE_SECONDS - 5
+    reader = Reader()
+    monkeypatch.setattr(fa, "read_wiki", reader)
+    monkeypatch.setattr(fa, "SNAPSHOT_CONNECTION", "x")
+    monkeypatch.setattr(fa, "_snapshot_load", load)
+    monkeypatch.setattr(fa, "remote_head", lambda: "abc")
+    fa.documents()
+    assert fa.cache["head"] == "abc"
+    fa.documents()
+    assert wait_for(lambda: time.time() - fa.cache["time"] < 5) and reader.calls == 0
