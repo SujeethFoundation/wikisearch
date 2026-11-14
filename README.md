@@ -37,6 +37,16 @@ Add `debug=true` (or `"debug": true`) and each result gets a `why`: per word its
 
 `/document` returns `title`, `url`, `source`, `chunk_id`, `text`, `total_chars`, and `truncated`. A page that does not exist, or is excluded, returns 404.
 
+## Refresh on every edit
+
+A wiki edit can take up to `CACHE_SECONDS` to appear. To make it appear within seconds, add a GitHub webhook:
+
+1. Set `WIKI_WEBHOOK_SECRET` on the Function App to a long random string.
+2. In the GitHub repository, go to **Settings → Webhooks → Add webhook**. Payload URL: `https://<app>.azurewebsites.net/api/wiki-webhook?code=<function key>`. Content type: `application/json`. Secret: the same string. Under "Let me select individual events" tick only **Wiki**.
+3. Edit a wiki page. **Recent Deliveries** shows `202`, and the log shows a refresh.
+
+The route checks GitHub's `X-Hub-Signature-256` signature, answers `ping` with 200, ignores every event except `gollum`, and refreshes in the background (it answers `202` at once).
+
 ## Privacy: excluded pages
 
 Pages about recorded circle sessions (titles like "Spring 2025 Week 4 Circle J") hold recording links and meeting summaries, so they are never searched or returned. The default pattern is:
@@ -58,6 +68,7 @@ It is checked against the page title and file path. Change it with `WIKI_EXCLUDE
 | `MAX_FILES` | `250` | Maximum pages loaded |
 | `PRELOAD_ON_START` | `true` | Start reading the wiki when the worker starts, not at the first request |
 | `WIKI_SNAPSHOT_CONNECTION_STRING` | none (off) | Storage connection string for a shared snapshot of the pages. When set, every read from GitHub is also saved there, and a new instance loads the snapshot first (under a second) and then refreshes from GitHub in the background |
+| `WIKI_WEBHOOK_SECRET` | none (webhook off) | The secret of the GitHub wiki webhook (see "Refresh on every edit"). Without it `POST /api/wiki-webhook` answers 503 |
 | `WIKI_SNAPSHOT_CONTAINER` | `wiki-cache` | Container for the snapshot, created if it does not exist |
 | `WIKI_SNAPSHOT_BLOB` | `wiki-snapshot.json` | Blob name of the snapshot |
 | `WIKI_EXCLUDE_TITLE_PATTERN` | see above | Pages never returned |
