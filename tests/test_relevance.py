@@ -158,7 +158,7 @@ def test_the_routes_report_the_ranking_settings_and_take_debug(monkeypatch):
     monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
     get = lambda params: json.loads(fa.search._function._func(func.HttpRequest("GET", "/api/search", params=params, headers={}, body=b"")).get_body())
     plain = get({"q": "tailor my resume", "full_text": "false"})
-    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5, "synonym_weight": 0.7, "also_weight": 0.4} and "why" not in plain["results"][0]
+    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5, "hub_expand": True, "synonym_weight": 0.7, "also_weight": 0.4} and "why" not in plain["results"][0]
     assert "why" in get({"q": "tailor my resume", "full_text": "false", "debug": "true"})["results"][0]
     post = func.HttpRequest("POST", "/api/search", params={}, headers={}, body=json.dumps({"query": "resume", "debug": True, "full_text": False}).encode())
     assert "why" in json.loads(fa.search._function._func(post).get_body())["results"][0]
@@ -227,6 +227,52 @@ def test_the_overview_boost_can_be_turned_off_and_needs_three_linked_pages(monke
     few = [page("A", "agenda of the week"), page("B", "agenda of the week"), page("Hub", "agenda of the week [[A]] [[B]]")]
     use(monkeypatch, few, HUB_BOOST=0.5)
     assert all("hub_pages" not in r["why"] for r in fa.rank("agenda week", debug=True))
+
+
+def search_route(monkeypatch, params):
+    monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
+    request = func.HttpRequest("GET", "/api/search", params=params, headers={}, body=b"")
+    return json.loads(fa.search._function._func(request).get_body())
+
+
+def test_the_overview_brings_the_pages_it_links_to_even_past_the_limit(monkeypatch):
+    use(monkeypatch, weekly_wiki(), HUB_BOOST=0.5)
+    body = search_route(monkeypatch, {"q": "weekly agendas", "limit": "2", "full_text": "false"})
+    paths = [r["path"] for r in body["results"]]
+    # the overview, then every week in the order it links them, not in score order
+    assert paths[0] == "Weekly-Content.md" and paths[1:] == [f"Week-{n}.md" for n in range(1, 7)]
+    hub = body["results"][0]
+    assert hub["hub_pages"] == [f"https://github.com/o/r/wiki/Week-{n}" for n in range(1, 7)]
+    assert all(r["hub_of"] == hub["url"] for r in body["results"][1:]) and "hub_of" not in hub
+    assert len(paths) == len(set(paths))
+
+
+def test_a_question_about_one_week_gets_no_expansion(monkeypatch):
+    use(monkeypatch, weekly_wiki(), HUB_BOOST=0.5)
+    body = search_route(monkeypatch, {"q": "agenda for week 4", "limit": "2", "full_text": "false"})
+    assert len(body["results"]) == 2 and not any("hub_pages" in r or "hub_of" in r for r in body["results"])
+
+
+def test_the_expansion_can_be_turned_off(monkeypatch):
+    use(monkeypatch, weekly_wiki(), HUB_BOOST=0.5, HUB_EXPAND=False)
+    body = search_route(monkeypatch, {"q": "weekly agendas", "limit": "2", "full_text": "false"})
+    assert len(body["results"]) == 2 and body["ranking"]["hub_expand"] is False
+    assert not any("hub_pages" in r or "hub_of" in r for r in body["results"])
+
+
+def test_a_page_is_marked_as_part_of_an_overview_only_when_that_overview_is_returned(monkeypatch):
+    docs = weekly_wiki() + [page("Donate", "How to donate and give a gift. [[Week-1]] [[Week-2]] [[Week-3]] donate gift week agenda")]
+    use(monkeypatch, docs, HUB_BOOST=0.5)
+    body = search_route(monkeypatch, {"q": "weekly agendas", "limit": "20", "full_text": "false"})
+    shown = {r["url"] for r in body["results"]}
+    assert all(r["hub_of"] in shown for r in body["results"] if "hub_of" in r)
+
+
+def test_an_expanded_page_that_is_already_shown_appears_once(monkeypatch):
+    use(monkeypatch, weekly_wiki(), HUB_BOOST=0.5)
+    body = search_route(monkeypatch, {"q": "weekly agendas", "limit": "20", "full_text": "false"})
+    paths = [r["path"] for r in body["results"]]
+    assert len(paths) == len(set(paths)) and paths[:7] == ["Weekly-Content.md"] + [f"Week-{n}.md" for n in range(1, 7)]
 
 
 def test_give_is_a_request_word_not_a_topic(monkeypatch):

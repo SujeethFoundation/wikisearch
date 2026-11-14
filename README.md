@@ -78,6 +78,7 @@ It is checked against the page title and file path. Change it with `WIKI_EXCLUDE
 | `WIKI_STEMMER` | `english` | How words are compared. `prefix` goes back to the first five letters. If the `snowballstemmer` package is missing the app falls back to `prefix` and says so in `/health` |
 | `WIKI_PHRASE_BOOST` | `0.5` | How much a page gains for having the question's words together. `0` turns it off |
 | `WIKI_HUB_BOOST` | `0.5` | How much an overview page gains when it links to three or more pages that also match the question (Weekly Content for "weekly agendas"). `0` turns it off |
+| `WIKI_HUB_EXPAND` | `true` | When an overview page is boosted as the hub of the question, `/search` returns the pages it links to that match, right after it and in the order it links them, even past `limit` (at most 20 results in all). The overview carries `hub_pages` (their addresses) and each of them `hub_of` (the overview's address), so a caller can keep them together. `false` returns exactly `limit` results and leaves the marks out |
 | `WIKI_UNIQUE_PAGES` | `true` | Return each page once. `false` returns every file, even when two share an address |
 | `WIKI_BEST_PASSAGE` | `true` | Choose the excerpt that holds the most of the question. `false` starts at the rarest matching word, as before |
 
