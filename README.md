@@ -69,6 +69,7 @@ It is checked against the page title and file path. Change it with `WIKI_EXCLUDE
 | `PRELOAD_ON_START` | `true` | Start reading the wiki when the worker starts, not at the first request |
 | `WIKI_SNAPSHOT_CONNECTION_STRING` | none (off) | Storage connection string for a shared snapshot of the pages. When set, every read from GitHub is also saved there, and a new instance loads the snapshot first (under a second) and then refreshes from GitHub in the background |
 | `WIKI_WEBHOOK_SECRET` | none (webhook off) | The secret of the GitHub wiki webhook (see "Refresh on every edit"). Without it `POST /api/wiki-webhook` answers 503 |
+| `WIKI_SKIP_UNCHANGED` | `true` | Before a scheduled refresh, ask GitHub for the wiki's latest commit (under a second) and skip the 20-second clone when it is the one already loaded. `POST /refresh` always reads. `false` always clones |
 | `WIKI_SNAPSHOT_CONTAINER` | `wiki-cache` | Container for the snapshot, created if it does not exist |
 | `WIKI_SNAPSHOT_BLOB` | `wiki-snapshot.json` | Blob name of the snapshot |
 | `WIKI_EXCLUDE_TITLE_PATTERN` | see above | Pages never returned |
