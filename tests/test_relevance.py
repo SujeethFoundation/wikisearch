@@ -158,7 +158,7 @@ def test_the_routes_report_the_ranking_settings_and_take_debug(monkeypatch):
     monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
     get = lambda params: json.loads(fa.search._function._func(func.HttpRequest("GET", "/api/search", params=params, headers={}, body=b"")).get_body())
     plain = get({"q": "tailor my resume", "full_text": "false"})
-    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5, "synonym_weight": 0.7} and "why" not in plain["results"][0]
+    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5, "synonym_weight": 0.7, "also_weight": 0.4} and "why" not in plain["results"][0]
     assert "why" in get({"q": "tailor my resume", "full_text": "false", "debug": "true"})["results"][0]
     post = func.HttpRequest("POST", "/api/search", params={}, headers={}, body=json.dumps({"query": "resume", "debug": True, "full_text": False}).encode())
     assert "why" in json.loads(fa.search._function._func(post).get_body())["results"][0]
@@ -263,3 +263,26 @@ def test_synonyms_json_is_valid_and_a_broken_file_means_none(tmp_path):
     (tmp_path / "bad.json").write_text("{not json")
     assert fa.load_synonym_groups(tmp_path / "bad.json") == []
     assert fa.load_synonym_groups(tmp_path / "missing.json") == []
+
+
+# ---- extra words from a caller (`also`)
+
+def test_extra_words_lift_a_page_without_marking_others_down_or_adding_pages(monkeypatch):
+    docs = [page("A", "Week 5 covers interviews and resumes."), page("B", "Week 5 covers interviews and mock practice."),
+            page("C", "Only mock practice here.")]
+    use(monkeypatch, docs, SYNONYM_WEIGHT=0)
+    assert [r["path"] for r in fa.rank("interviews")] == ["A.md", "B.md"] or [r["path"] for r in fa.rank("interviews")] == ["B.md", "A.md"]
+    plain = {r["path"]: r["score"] for r in fa.rank("interviews")}
+    boosted = fa.rank("interviews", also="mock practice")
+    assert [r["path"] for r in boosted][0] == "B.md" and {r["path"] for r in boosted} == {"A.md", "B.md"}   # C has no question word
+    assert next(r for r in boosted if r["path"] == "A.md")["score"] == plain["A.md"]                         # A is not marked down
+    assert fa.rank("interviews", also=["mock", "practice"])[0]["path"] == "B.md"
+    assert fa.rank("interviews", also="mock", debug=True)[0]["why"]["found_extra_words"] == ["mock"]
+
+
+def test_extra_words_can_be_turned_off_and_ignore_the_question_words_and_stop_words(monkeypatch):
+    docs = [page("A", "interviews and resumes"), page("B", "interviews and mock practice")]
+    use(monkeypatch, docs, SYNONYM_WEIGHT=0, ALSO_WEIGHT=0)
+    assert fa.rank("interviews", also="mock") == fa.rank("interviews")
+    use(monkeypatch, docs, SYNONYM_WEIGHT=0)
+    assert fa.rank("interviews", also="interviews the and") == fa.rank("interviews")
