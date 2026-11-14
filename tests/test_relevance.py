@@ -425,3 +425,14 @@ def test_how_many_words_are_not_the_topic():
     assert fa.query_stems("What are the agendas for all the weeks?") == fa.query_stems("agendas weeks")
     assert fa.query_stems("each") == ["each"]  # a question of nothing else keeps its words
 
+
+# ---- the deployed package
+
+def test_the_deploy_workflow_ships_the_synonym_file():
+    """function_app.py reads synonyms.json at start-up and searches without synonyms when it is missing, so a package without it
+    deploys fine and ranks worse (the syllabus overview was not found as an agenda page in production for that reason)."""
+    from pathlib import Path
+    workflows = list((Path(fa.__file__).parent / ".github" / "workflows").glob("*.y*ml"))
+    assert workflows and all("synonyms.json" in w.read_text(encoding="utf-8") for w in workflows)
+    assert fa.SYNONYM_GROUPS, "synonyms.json did not load"
+

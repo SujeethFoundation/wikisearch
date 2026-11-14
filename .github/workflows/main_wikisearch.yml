@@ -30,6 +30,7 @@ jobs:
           test -f function_app.py
           test -f host.json
           test -f requirements.txt
+          test -f synonyms.json
 
       - name: Validate Python syntax
         run: python -m py_compile function_app.py
@@ -43,6 +44,7 @@ jobs:
           name: python-app
           path: |
             function_app.py
+            synonyms.json
             host.json
             requirements.txt
             !local.settings.json
