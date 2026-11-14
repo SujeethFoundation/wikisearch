@@ -118,7 +118,7 @@ STOPWORDS = {
     "we", "what", "when", "where", "which", "who", "why", "will", "with", "would",
     "you", "your",
     # request verbs that start questions but say nothing about the topic
-    "describe", "explain", "please", "show", "tell",
+    "describe", "explain", "give", "please", "show", "tell",
 }
 BM25_K1 = 1.2
 BM25_B = 0.75
@@ -140,6 +140,13 @@ BEST_PASSAGE = os.getenv("WIKI_BEST_PASSAGE", "true").strip().lower() in ("1", "
 # one (".../wiki/Home"), as do addresses that differ only in case or a trailing slash: the better-ranked one is returned,
 # the other is not. WIKI_UNIQUE_PAGES=false returns every file.
 UNIQUE_PAGES = os.getenv("WIKI_UNIQUE_PAGES", "true").strip().lower() in ("1", "true", "yes", "on")
+# A page that links to several pages that also answer the question is the overview of them ("weekly agendas" -> the Weekly
+# Content page that links to all six weeks). It scores up to 1 + WIKI_HUB_BOOST times as much, reached at HUB_FULL linked
+# pages that match most of the question's words. 0 turns it off.
+HUB_BOOST = float(os.getenv("WIKI_HUB_BOOST", "0.5"))
+HUB_FULL = 6
+HUB_MIN = 3  # fewer linked pages than this is a page that merely mentions others, not an overview
+HUB_MATCH = 0.8  # a linked page counts when it holds at least this share of the question's words
 SNIPPET_CHARS = 1500
 SNIPPET_LEAD = 200
 PAIR_WINDOW = 4  # two of the question's words count as together when at most this many words apart, in order
@@ -200,6 +207,11 @@ def _places(stem_list):
     return where
 
 
+def page_key(name):
+    """A page name as letters and digits only, so "Week 1: Self-Assessment" and the file Week-1:-Self-Assessment.md agree."""
+    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+
 def build_index(docs):
     """Precompute term counts for every page. Rebuilt whenever the wiki is reloaded."""
     entries, df = [], Counter()
@@ -222,6 +234,8 @@ def build_index(docs):
             "positions": positions,
             "where": _places(body_stems),
             "length": max(1, len(body_stems)),
+            "key": page_key(doc["path"].rsplit(".", 1)[0]),
+            "links": {page_key(m.split("|")[0]) for m in re.findall(r"\[\[([^\]]+)\]\]", doc["text"])},
         })
     average = sum(e["length"] for e in entries) / len(entries) if entries else 1.0
     return {"entries": entries, "df": df, "average_length": average}
@@ -375,6 +389,8 @@ def rank(query, debug=False):
             "chunk_id": doc["path"],
             "score": round(score, 3),
             "snippet": entry["body"][start:start + SNIPPET_CHARS],
+            "_matched": len(matched),
+            "_title": title_hits,
         }
         if debug:
             result["why"] = {
@@ -390,6 +406,8 @@ def rank(query, debug=False):
                 "excerpt_starts_at": start,
             }
         results.append(result)
+    if HUB_BOOST > 0:
+        apply_hub_boost(results, index, len(terms))
     results.sort(key=lambda r: (-r["score"], r["title"]))
     return unique_pages(results) if UNIQUE_PAGES else results
 
@@ -412,8 +430,28 @@ def unique_pages(results):
     return out
 
 
+def apply_hub_boost(results, index, term_count):
+    """Lift a page that links to pages that match the question too: it is their overview."""
+    by_key = {e["key"]: e["doc"]["path"] for e in index["entries"]}
+    strong = {r["path"] for r in results if r["_matched"] >= HUB_MATCH * term_count}
+    links = {e["doc"]["path"]: e["links"] for e in index["entries"]}
+    title_hits = {r["path"]: r["_title"] for r in results}
+    for r in results:
+        children = {by_key[k] for k in links.get(r["path"], ()) if k in by_key} & strong
+        children.discard(r["path"])
+        # A linked page whose title fits the question better is the answer itself ("week 4"), and the overview stays below it.
+        specific = any(title_hits[c] > r["_title"] for c in children)
+        if r["_matched"] >= HUB_MATCH * term_count and len(children) >= HUB_MIN and not specific:
+            r["score"] = round(r["score"] * (1 + HUB_BOOST * min(len(children), HUB_FULL) / HUB_FULL), 3)
+            if "why" in r:
+                r["why"]["hub_pages"] = len(children)
+    for r in results:
+        r.pop("_matched", None)
+        r.pop("_title", None)
+
+
 def ranking_settings():
-    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES}
+    return {"stemmer": stemmer_in_use(), "phrase_boost": PHRASE_BOOST, "best_passage": BEST_PASSAGE, "unique_pages": UNIQUE_PAGES, "hub_boost": HUB_BOOST}
 
 
 

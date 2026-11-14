@@ -158,7 +158,7 @@ def test_the_routes_report_the_ranking_settings_and_take_debug(monkeypatch):
     monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
     get = lambda params: json.loads(fa.search._function._func(func.HttpRequest("GET", "/api/search", params=params, headers={}, body=b"")).get_body())
     plain = get({"q": "tailor my resume", "full_text": "false"})
-    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True} and "why" not in plain["results"][0]
+    assert plain["ranking"] == {"stemmer": "english", "phrase_boost": 0.5, "best_passage": True, "unique_pages": True, "hub_boost": 0.5} and "why" not in plain["results"][0]
     assert "why" in get({"q": "tailor my resume", "full_text": "false", "debug": "true"})["results"][0]
     post = func.HttpRequest("POST", "/api/search", params={}, headers={}, body=json.dumps({"query": "resume", "debug": True, "full_text": False}).encode())
     assert "why" in json.loads(fa.search._function._func(post).get_body())["results"][0]
@@ -195,3 +195,39 @@ def test_the_search_route_returns_five_different_pages(monkeypatch):
                                                                   headers={}, body=b"")).get_body())
     urls = [r["url"] for r in body["results"]]
     assert len(urls) == len(set(urls)) == 4 and body["count"] == 4
+
+
+# ---- an overview page that links to the pages that answer
+
+def weekly_wiki():
+    weeks = [page(f"Week-{n}", f"Week {n} agenda: icebreaker and discussion.", title=f"Week {n}") for n in range(1, 7)]
+    hub = page("Weekly-Content", "Each week has an agenda. " + " ".join(f"The agenda covers week {n} goals. [[Week {n}]]" for n in range(1, 7)))
+    home = page("Home", "Welcome. [[Weekly-Content]] holds the agenda for each week.")
+    return weeks + [hub, home]
+
+
+def test_the_overview_that_links_to_every_week_comes_before_one_week(monkeypatch):
+    use(monkeypatch, weekly_wiki(), HUB_BOOST=0.5)
+    assert order("weekly agendas")[0] == "Weekly-Content.md"
+
+
+def test_a_question_about_one_week_is_still_answered_by_that_week(monkeypatch):
+    use(monkeypatch, weekly_wiki(), HUB_BOOST=0.5)
+    assert order("agenda for week 4")[0] == "Week-4.md"
+
+
+def test_the_overview_boost_can_be_turned_off_and_needs_three_linked_pages(monkeypatch):
+    docs = weekly_wiki()
+    use(monkeypatch, docs, HUB_BOOST=0)
+    off = {r["path"]: r["score"] for r in fa.rank("weekly agendas")}
+    use(monkeypatch, docs, HUB_BOOST=0.5)
+    on = {r["path"]: r["score"] for r in fa.rank("weekly agendas")}
+    assert on["Weekly-Content.md"] > off["Weekly-Content.md"] and on["Week-1.md"] == off["Week-1.md"]
+    assert fa.rank("weekly agendas", debug=True)[0]["why"]["hub_pages"] == 6
+    few = [page("A", "agenda of the week"), page("B", "agenda of the week"), page("Hub", "agenda of the week [[A]] [[B]]")]
+    use(monkeypatch, few, HUB_BOOST=0.5)
+    assert all("hub_pages" not in r["why"] for r in fa.rank("agenda week", debug=True))
+
+
+def test_give_is_a_request_word_not_a_topic(monkeypatch):
+    assert fa.query_stems("can you give me the weekly agendas?") == fa.query_stems("weekly agendas")
