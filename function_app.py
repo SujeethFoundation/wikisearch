@@ -557,6 +557,23 @@ def walk_markdown(repo, tree_id, prefix=""):
         yield path, content
 
 
+_read_head = {"sha": None}
+
+
+def remote_head():
+    """The commit the wiki's HEAD points to on GitHub (a sub-second check), or None when it cannot be read."""
+    try:
+        from dulwich.client import get_transport_and_path
+
+        client, path = get_transport_and_path(f"https://github.com/{OWNER}/{REPO}.wiki.git")
+        result = client.get_refs(path)
+        sha = getattr(result, "refs", result).get(b"HEAD")
+        return sha.decode() if sha else None
+    except Exception as exc:
+        logging.warning("Could not check the wiki's latest commit (%s); reading it instead", type(exc).__name__)
+        return None
+
+
 def read_wiki():
     """
     Clone the public GitHub wiki using Dulwich, without calling system Git.
@@ -583,6 +600,7 @@ def read_wiki():
             try:
                 head = wiki_repo.head()
                 commit = wiki_repo[head]
+                _read_head["sha"] = head.decode() if isinstance(head, bytes) else str(head)
                 count = 0
 
                 for path, content in walk_markdown(
@@ -638,6 +656,7 @@ _last_failure = {"time": 0.0, "error": None}
 # fraction of a second, and the usual background refresh brings it up to date from GitHub afterwards.
 # If the snapshot is missing, unreadable or invalid the instance reads GitHub as before.
 # ---------------------------------------------------------------------------
+SKIP_UNCHANGED = os.getenv("WIKI_SKIP_UNCHANGED", "true").strip().lower() in ("1", "true", "yes", "on")
 PRELOAD_ON_START = os.getenv("PRELOAD_ON_START", "true").strip().lower() in ("1", "true", "yes", "on")
 SNAPSHOT_CONNECTION = os.getenv("WIKI_SNAPSHOT_CONNECTION_STRING", "")
 SNAPSHOT_CONTAINER = os.getenv("WIKI_SNAPSHOT_CONTAINER", "wiki-cache")
@@ -658,8 +677,12 @@ def _valid_docs(docs):
     )
 
 
+_snapshot_head = {"sha": None}  # the wiki commit the loaded snapshot was read at, when it says
+
+
 def _snapshot_load():
     """(docs, saved_at) from the shared snapshot, or None. Never raises."""
+    _snapshot_head["sha"] = None
     if not _snapshot_enabled():
         return None
     try:
@@ -671,14 +694,15 @@ def _snapshot_load():
         if not _valid_docs(docs):
             logging.warning("Wiki snapshot is not valid; reading GitHub instead")
             return None
+        _snapshot_head["sha"] = data.get("head") if isinstance(data.get("head"), str) else None
         return docs, saved_at
     except Exception as exc:
         logging.warning("Wiki snapshot could not be read (%s); reading GitHub instead", type(exc).__name__)
         return None
 
 
-def _snapshot_save(docs, saved_at):
-    """Write the pages to the shared snapshot. Never raises."""
+def _snapshot_save(docs, saved_at, head=None):
+    """Write the pages to the shared snapshot, with the wiki commit they were read at. Never raises."""
     if not _snapshot_enabled():
         return
     try:
@@ -690,7 +714,7 @@ def _snapshot_save(docs, saved_at):
             container.create_container()
         except ResourceExistsError:
             pass
-        payload = json.dumps({"saved_at": saved_at, "docs": docs}, ensure_ascii=False)
+        payload = json.dumps({"saved_at": saved_at, "head": head, "docs": docs}, ensure_ascii=False)
         container.upload_blob(SNAPSHOT_BLOB, payload.encode("utf-8"), overwrite=True,
                               timeout=SNAPSHOT_TIMEOUT_SECONDS)
         logging.info("Saved %d wiki pages to the shared snapshot", len(docs))
@@ -698,8 +722,17 @@ def _snapshot_save(docs, saved_at):
         logging.warning("Wiki snapshot could not be saved (%s)", type(exc).__name__)
 
 
-def _rebuild():
-    """Read the wiki and replace the cached copy. Callers hold _refresh_lock."""
+def _rebuild(force=True):
+    """Read the wiki and replace the cached copy. Callers hold _refresh_lock.
+
+    A refresh that is not forced first asks GitHub for the wiki's latest commit (under a second) and, when it is the one
+    already in memory, keeps the pages and only restarts the CACHE_SECONDS clock: the 20-second clone is skipped.
+    """
+    if not force and SKIP_UNCHANGED and cache["docs"] and cache.get("head"):
+        if remote_head() == cache["head"]:
+            cache["time"] = time.time()
+            logging.info("Wiki unchanged at %s; kept the loaded pages", cache["head"][:7])
+            return cache["docs"]
     docs = read_wiki()
 
     if not docs:
@@ -709,9 +742,9 @@ def _rebuild():
         )
 
     saved_at = time.time()
-    cache.update({"time": saved_at, "docs": docs, "index": build_index(docs), "source": "github"})
+    cache.update({"time": saved_at, "docs": docs, "index": build_index(docs), "source": "github", "head": _read_head["sha"]})
     if _snapshot_enabled():
-        threading.Thread(target=_snapshot_save, args=(docs, saved_at), name="wiki-snapshot", daemon=True).start()
+        threading.Thread(target=_snapshot_save, args=(docs, saved_at, cache["head"]), name="wiki-snapshot", daemon=True).start()
     return docs
 
 
@@ -722,7 +755,7 @@ def _refresh_in_background():
 
     def work():
         try:
-            _rebuild()
+            _rebuild(force=False)
         except Exception:
             logging.exception("Background wiki refresh failed; the older copy stays in use")
         finally:
@@ -756,7 +789,7 @@ def documents(force=False):
             loaded = _snapshot_load()
             if loaded:
                 docs, saved_at = loaded
-                cache.update({"time": saved_at, "docs": docs, "index": build_index(docs), "source": "snapshot"})
+                cache.update({"time": saved_at, "docs": docs, "index": build_index(docs), "source": "snapshot", "head": _snapshot_head["sha"]})
                 logging.info("Loaded %d wiki pages from the shared snapshot (%d seconds old)",
                              len(docs), time.time() - saved_at)
                 # If the snapshot is older than CACHE_SECONDS, the next request starts the usual background refresh.
