@@ -166,6 +166,27 @@ def test_the_routes_report_the_ranking_settings_and_take_debug(monkeypatch):
     assert health["ranking"]["stemmer"] == "english"
 
 
+def test_post_search_batches_query_variants_and_labels_results(monkeypatch):
+    use(monkeypatch, [])
+    monkeypatch.setattr(fa, "documents", lambda force=False: fa.cache["docs"])
+    ranked = []
+    def rank(query, debug=False, also=None):
+        ranked.append(query)
+        return [{"title": query, "url": f"https://github.com/o/r/wiki/{query}", "path": f"{query}.md",
+                 "source": "wiki", "score": 1.0, "snippet": query}]
+    monkeypatch.setattr(fa, "rank", rank)
+    monkeypatch.setattr(fa, "expand_hubs", lambda results, selected: selected)
+    request = func.HttpRequest("POST", "/api/search", params={}, headers={}, body=json.dumps({
+        "query": "career circles", "queries": ["career circles", "research companies", "compare workplace"],
+        "limit": 3, "full_text": False,
+    }).encode())
+    result = json.loads(fa.search._function._func(request).get_body())
+    assert result["queries"] == ["career circles", "research companies", "compare workplace"]
+    assert set(ranked) == set(result["queries"])
+    assert {item["for_query"] for item in result["results"]} == set(result["queries"])
+    assert len({item["url"] for item in result["results"]}) == 3
+
+
 # ---- every result is a different page
 
 def test_two_files_with_the_same_address_are_one_page_and_the_better_one_is_returned(monkeypatch):

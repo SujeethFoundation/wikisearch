@@ -23,7 +23,7 @@ All routes require a Function key and are under `/api`.
 | Route | Purpose |
 |---|---|
 | `GET /health` | Status, whether the cache is loaded, document count |
-| `GET /search?q=...&limit=8` or `POST /search` with `{"query": "...", "limit": 8}` | Ranked results (limit 1–20) |
+| `GET /search?q=...&limit=8` or `POST /search` with `{"query": "...", "queries": ["..."], "limit": 8}` | Ranked results (limit 1–20). A POST can batch up to five query variants; results include `for_query` to identify which query found each page |
 | `GET /document` or `POST /document` | One page as plain text. Provide `url`, `path`, or `title`. Optional `max_chars` (500–30000, default 8000) |
 | `POST /refresh` | Reload the wiki now |
 

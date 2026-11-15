@@ -10,6 +10,7 @@ import stat
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1006,6 +1007,7 @@ def search(req: func.HttpRequest):
         if req.method == "POST":
             body = req.get_json()
             query = str(body.get("query", "")).strip()
+            requested_queries = body.get("queries") or []
             limit = int(body.get("limit", 8))
             full_text = parse_flag(body.get("full_text"), True)
             max_chars = int(body.get("max_chars", 8000))
@@ -1017,6 +1019,7 @@ def search(req: func.HttpRequest):
                 or req.params.get("query")
                 or ""
             ).strip()
+            requested_queries = []
             limit = int(req.params.get("limit", 8))
             full_text = parse_flag(req.params.get("full_text"), True)
             max_chars = int(req.params.get("max_chars", 8000))
@@ -1034,14 +1037,44 @@ def search(req: func.HttpRequest):
 
         documents()  # load or refresh the wiki and its ranking index
         # debug=true adds to each result how its score came about ("why"): the words, the title, the pairs found together.
-        results = rank(query, debug=debug, also=also)
-        shown = expand_hubs(results, results[: max(1, min(limit, 20))])
+        queries, seen_queries = [], set()
+        for text in [query] + (requested_queries if isinstance(requested_queries, list) else []):
+            if not isinstance(text, str):
+                continue
+            text = text.strip()
+            key = " ".join(text.casefold().split())
+            if text and key not in seen_queries:
+                seen_queries.add(key)
+                queries.append(text)
+            if len(queries) >= 5:
+                break
+        if len(queries) > 1:
+            with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+                ranked = list(pool.map(lambda text: rank(text, debug=debug, also=also), queries))
+            per_query = [expand_hubs(found, found[: max(1, min(limit, 20))]) for found in ranked]
+            shown, positions = [], {}
+            for text, found in zip(queries, per_query):
+                for item in found:
+                    item = {**item, "for_query": text}
+                    identity = (item.get("url") or item.get("path") or item.get("title") or "").casefold().rstrip("/")
+                    if identity in positions:
+                        previous = shown[positions[identity]]
+                        previous["for_queries"] = list(dict.fromkeys((previous.get("for_queries") or
+                                                                        [previous.get("for_query")]) + [text]))
+                        continue
+                    positions[identity] = len(shown)
+                    shown.append(item)
+            results = [item for group in ranked for item in group]
+        else:
+            results = rank(query, debug=debug, also=also)
+            shown = expand_hubs(results, results[: max(1, min(limit, 20))])
         if full_text:
             attach_full_text(shown, max(500, min(max_chars, 30000)))
 
         return respond(
             {
                 "query": query,
+                **({"queries": queries} if len(queries) > 1 else {}),
                 "search_mode": "keyword_bm25",
                 "ranking": ranking_settings(),
                 "full_text": full_text,
