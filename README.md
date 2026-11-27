@@ -126,3 +126,7 @@ Seven questions improved and two got worse. "Where are the weekly materials?" fe
 - Keyword matching only. A query that shares no words with a page will not find it.
 - Each instance keeps its own copy of the wiki. A wiki edit can take up to `CACHE_SECONDS` to appear unless you call `POST /refresh`.
 - Only pages in the wiki repository are covered. The website is searched by the websearch app.
+
+## Platform architecture
+
+This repo is one of nine in the SujeethFoundation org. The architecture docs live in the website repo's `architecture/` folder: [platform architecture](https://github.com/SujeethFoundation/sujeethfoundation.github.io/blob/main/architecture/platform-architecture.md), [data model and portal](https://github.com/SujeethFoundation/sujeethfoundation.github.io/blob/main/architecture/platform-data-model-and-portal.md) and [business architecture](https://github.com/SujeethFoundation/sujeethfoundation.github.io/blob/main/architecture/business-architecture.md). This repo is the wiki search. See "wikisearch" in the platform architecture doc. Each repo's README is listed in the platform architecture doc under "Repo READMEs".
