@@ -17,7 +17,7 @@ The Sujeeth Foundation helps college students network into their first job throu
 | [`websearch`](https://github.com/SujeethFoundation/websearch/blob/main/README.md) | Crawler and hybrid search over ontology-approved websites |
 | [`wikisearch`](https://github.com/SujeethFoundation/wikisearch/blob/main/README.md) | Keyword search over the GitHub wiki |
 | [`payments`](https://github.com/SujeethFoundation/payments/blob/main/README.md) | PayPal checkout and webhook for online courses |
-| [`shortner`](https://github.com/SujeethFoundation/shortner/blob/main/README.md) | Link shortener for go.sujeeth.org |
+| [`shortener`](https://github.com/SujeethFoundation/shortener/blob/main/README.md) | Link shortener for go.sujeeth.org |
 | [`acs-sms-bot`](https://github.com/SujeethFoundation/acs-sms-bot/blob/main/readme.md) | Texting through Azure Communication Services |
 
 Architecture docs, in the website repo's `architecture/` folder: [platform architecture](https://github.com/SujeethFoundation/sujeethfoundation.github.io/blob/main/architecture/platform-architecture.md) (repos, Azure apps, how they connect), [data model and portal](https://github.com/SujeethFoundation/sujeethfoundation.github.io/blob/main/architecture/platform-data-model-and-portal.md) (Dataverse tables, solutions, Power Pages) and [business architecture](https://github.com/SujeethFoundation/sujeethfoundation.github.io/blob/main/architecture/business-architecture.md) (vision, assumptions, tests). This block is the same in every repo's README; the canonical copy is in the platform architecture doc.
@@ -126,7 +126,7 @@ func start
 
 ## Measuring relevance
 
-`tests/relevance_gold.json` holds 44 questions written from the wiki's own pages, each with the pages that answer it and, for most, a phrase from the passage that answers it. `tests/relevance_eval.py` scores two things: where the first right page stands, and whether the excerpt shown for a right page in the top three holds the answer.
+`tests/relevance_gold.json` holds 111 questions written from the wiki's own pages, each with the pages that answer it and, for most, a phrase from the passage that answers it. `tests/relevance_eval.py` scores two things: where the first right page stands, and whether the excerpt shown for a right page in the top three holds the answer.
 
     python tests/relevance_eval.py --local                      # reads the wiki from GitHub, ranks with this checkout: no deploy needed
     python tests/relevance_eval.py --local --try stemmer=prefix phrase_boost=0 best_passage=false   # a second column with other settings
